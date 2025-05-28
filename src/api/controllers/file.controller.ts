@@ -6,10 +6,12 @@ import { UploadService } from '../../services/file/upload.service';
 import { Logger } from '../../utils/logger';
 import { ValidationError } from '../../utils/errors';
 import multer from 'multer';
+import { RateLimiterMemory } from 'rate-limiter-flexible';
 
 @injectable()
 export class FileController {
   private upload: multer.Multer;
+  private uploadRateLimiter: RateLimiterMemory;
   
   constructor(
     @inject('FileService') private fileService: FileService,
@@ -26,6 +28,32 @@ export class FileController {
         fileSize: 50 * 1024 * 1024, // 50MB limit for regular uploads
       }
     });
+    
+    // Configure rate limiter for uploads
+    this.uploadRateLimiter = new RateLimiterMemory({
+      points: 10, // Number of uploads
+      duration: 60, // Per minute
+      blockDuration: 120 // Block for 2 minutes if exceeded
+    });
+  }
+  
+  /**
+   * Throttle upload requests
+   */
+  private async throttleUpload(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const userId = req.user?.id || req.ip;
+      await this.uploadRateLimiter.consume(userId, 1);
+      next();
+    } catch (error: any) {
+      const retryAfter = Math.floor(error.msBeforeNext / 1000) || 60;
+      res.set('Retry-After', String(retryAfter));
+      res.status(429).json({
+        success: false,
+        message: 'Too many upload requests, please try again later',
+        retryAfter
+      });
+    }
   }
   
   /**
@@ -122,49 +150,54 @@ export class FileController {
    * Upload a file (small files)
    */
   uploadFile = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    // Use multer middleware for file upload
-    this.upload.single('file')(req, res, async (err) => {
-      if (err) {
-        return next(err);
-      }
+    // Use throttling middleware
+    await this.throttleUpload(req, res, (err) => {
+      if (err) return next(err);
       
-      try {
-        if (!req.file) {
-          throw new ValidationError('No file uploaded');
+      // Use multer middleware for file upload
+      this.upload.single('file')(req, res, async (err) => {
+        if (err) {
+          return next(err);
         }
         
-        const { roomId, parentId, metadata } = req.body;
-        
-        if (!roomId) {
-          throw new ValidationError('Room ID is required');
+        try {
+          if (!req.file) {
+            throw new ValidationError('No file uploaded');
+          }
+          
+          const { roomId, parentId, metadata } = req.body;
+          
+          if (!roomId) {
+            throw new ValidationError('Room ID is required');
+          }
+          
+          // Get user ID from auth middleware
+          const userId = req.user.id;
+          
+          const result = await this.fileService.uploadFile({
+            name: req.file.originalname,
+            mimeType: req.file.mimetype,
+            size: req.file.size,
+            buffer: req.file.buffer,
+            roomId,
+            parentId: parentId || null,
+            userId,
+            metadata: metadata ? JSON.parse(metadata) : undefined
+          });
+          
+          if (!result.success) {
+            throw new Error(result.message || 'Failed to upload file');
+          }
+          
+          res.status(201).json({
+            success: true,
+            message: 'File uploaded successfully',
+            data: result.data
+          });
+        } catch (error) {
+          next(error);
         }
-        
-        // Get user ID from auth middleware
-        const userId = req.user.id;
-        
-        const result = await this.fileService.uploadFile({
-          name: req.file.originalname,
-          mimeType: req.file.mimetype,
-          size: req.file.size,
-          buffer: req.file.buffer,
-          roomId,
-          parentId: parentId || null,
-          userId,
-          metadata: metadata ? JSON.parse(metadata) : undefined
-        });
-        
-        if (!result.success) {
-          throw new Error(result.message || 'Failed to upload file');
-        }
-        
-        res.status(201).json({
-          success: true,
-          message: 'File uploaded successfully',
-          data: result.data
-        });
-      } catch (error) {
-        next(error);
-      }
+      });
     });
   };
   
@@ -172,38 +205,43 @@ export class FileController {
    * Initialize multipart upload
    */
   async initMultipartUpload(req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      const { fileName, mimeType, totalSize, roomId, parentId, metadata } = req.body;
+    // Use throttling middleware
+    await this.throttleUpload(req, res, async (err) => {
+      if (err) return next(err);
       
-      if (!fileName || !mimeType || !totalSize || !roomId) {
-        throw new ValidationError('Missing required fields');
+      try {
+        const { fileName, mimeType, totalSize, roomId, parentId, metadata } = req.body;
+        
+        if (!fileName || !mimeType || !totalSize || !roomId) {
+          throw new ValidationError('Missing required fields');
+        }
+        
+        // Get user ID from auth middleware
+        const userId = req.user.id;
+        
+        const result = await this.uploadService.initializeMultipartUpload({
+          fileName,
+          mimeType,
+          totalSize: Number(totalSize),
+          roomId,
+          parentId: parentId || null,
+          userId,
+          metadata: metadata ? JSON.parse(metadata) : undefined
+        });
+        
+        if (!result.success) {
+          throw new Error(result.message || 'Failed to initialize upload');
+        }
+        
+        res.status(201).json({
+          success: true,
+          message: 'Multipart upload initialized',
+          data: result.data
+        });
+      } catch (error) {
+        next(error);
       }
-      
-      // Get user ID from auth middleware
-      const userId = req.user.id;
-      
-      const result = await this.uploadService.initializeMultipartUpload({
-        fileName,
-        mimeType,
-        totalSize: Number(totalSize),
-        roomId,
-        parentId: parentId || null,
-        userId,
-        metadata: metadata ? JSON.parse(metadata) : undefined
-      });
-      
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to initialize upload');
-      }
-      
-      res.status(201).json({
-        success: true,
-        message: 'Multipart upload initialized',
-        data: result.data
-      });
-    } catch (error) {
-      next(error);
-    }
+    });
   }
   
   /**
@@ -350,7 +388,7 @@ export class FileController {
   /**
    * Get file download URL
    */
-  async getFileDownloadUrl(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getDownloadUrl(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { id } = req.params;
       
@@ -361,7 +399,7 @@ export class FileController {
       // Get user ID from auth middleware
       const userId = req.user.id;
       
-      const result = await this.fileService.getFileDownloadUrl(id, userId);
+      const result = await this.fileService.getDownloadUrl(id, userId);
       
       if (!result.success) {
         throw new Error(result.message || 'Failed to generate download URL');
@@ -564,6 +602,269 @@ export class FileController {
       res.json({
         success: true,
         data: result.data
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+  
+  /**
+   * Get file content with support for range requests
+   */
+  async getFileContent(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { id } = req.params;
+      
+      if (!id) {
+        throw new ValidationError('File ID is required');
+      }
+      
+      // Get user ID from auth middleware
+      const userId = req.user.id;
+      
+      // Get file info
+      const file = await this.fileService.getFile(id, userId);
+      
+      if (!file.success) {
+        throw new Error(file.message || 'Failed to get file');
+      }
+      
+      // Check for Range header
+      const rangeHeader = req.headers.range;
+      
+      if (rangeHeader) {
+        // Parse range header
+        const fileSize = file.data.size;
+        const parts = rangeHeader.replace(/bytes=/, '').split('-');
+        const start = parseInt(parts[0], 10);
+        const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
+        
+        // Validate range
+        if (isNaN(start) || isNaN(end) || start >= fileSize || end >= fileSize || start > end) {
+          res.status(416).send('Range Not Satisfiable');
+          return;
+        }
+        
+        const chunkSize = end - start + 1;
+        
+        // Get file content with range
+        const result = await this.fileService.getFileContent(id, userId, { start, end });
+        
+        if (!result.success) {
+          throw new Error(result.message || 'Failed to get file content');
+        }
+        
+        // Set headers for partial content
+        res.writeHead(206, {
+          'Content-Range': `bytes ${start}-${end}/${fileSize}`,
+          'Accept-Ranges': 'bytes',
+          'Content-Length': chunkSize,
+          'Content-Type': file.data.mimeType,
+          'Content-Disposition': `inline; filename="${file.data.name}"`
+        });
+        
+        // Send partial content
+        res.end(result.data);
+      } else {
+        // Get full file content
+        const result = await this.fileService.getFileContent(id, userId);
+        
+        if (!result.success) {
+          throw new Error(result.message || 'Failed to get file content');
+        }
+        
+        // Set headers for full content
+        res.writeHead(200, {
+          'Content-Length': file.data.size,
+          'Content-Type': file.data.mimeType,
+          'Content-Disposition': `inline; filename="${file.data.name}"`,
+          'Accept-Ranges': 'bytes'
+        });
+        
+        // Send full content
+        res.end(result.data);
+      }
+    } catch (error) {
+      next(error);
+    }
+  }
+  
+  /**
+   * Move multiple files to a destination folder
+   */
+  async moveFiles(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { fileIds, destinationFolderId } = req.body;
+      
+      if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+        throw new ValidationError('File IDs array is required');
+      }
+      
+      if (!destinationFolderId) {
+        throw new ValidationError('Destination folder ID is required');
+      }
+      
+      // Get user ID from auth middleware
+      const userId = req.user.id;
+      
+      const result = await this.fileService.moveFiles(fileIds, destinationFolderId, userId);
+      
+      res.status(result.success ? 200 : 207).json({
+        success: result.success,
+        message: result.message,
+        data: result.data
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+  
+  /**
+   * Delete multiple files
+   */
+  async deleteFiles(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { fileIds, permanent } = req.body;
+      
+      if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+        throw new ValidationError('File IDs array is required');
+      }
+      
+      // Get user ID from auth middleware
+      const userId = req.user.id;
+      
+      const result = await this.fileService.deleteFiles(fileIds, userId, permanent === true);
+      
+      res.status(result.success ? 200 : 207).json({
+        success: result.success,
+        message: result.message,
+        data: result.data
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+  
+  /**
+   * Copy multiple files to a destination folder
+   */
+  async copyFiles(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { fileIds, destinationFolderId } = req.body;
+      
+      if (!fileIds || !Array.isArray(fileIds) || fileIds.length === 0) {
+        throw new ValidationError('File IDs array is required');
+      }
+      
+      if (!destinationFolderId) {
+        throw new ValidationError('Destination folder ID is required');
+      }
+      
+      // Get user ID from auth middleware
+      const userId = req.user.id;
+      
+      const result = await this.fileService.copyFiles(fileIds, destinationFolderId, userId);
+      
+      res.status(result.success ? 200 : 207).json({
+        success: result.success,
+        message: result.message,
+        data: result.data
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+  
+  /**
+   * Search files with advanced filtering
+   */
+  async searchFiles(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { roomId } = req.params;
+      const { 
+        query,
+        fileTypes,
+        mimeTypes,
+        minSize,
+        maxSize,
+        createdBefore,
+        createdAfter,
+        updatedBefore,
+        updatedAfter,
+        tags,
+        sort,
+        page,
+        limit
+      } = req.query;
+      
+      if (!roomId) {
+        throw new ValidationError('Room ID is required');
+      }
+      
+      // Get user ID from auth middleware
+      const userId = req.user.id;
+      
+      // Process and convert parameters
+      const searchParams: any = {
+        query: query as string,
+        page: page ? parseInt(page as string) : undefined,
+        limit: limit ? parseInt(limit as string) : undefined,
+      };
+      
+      // Convert array parameters
+      if (fileTypes) {
+        searchParams.fileTypes = Array.isArray(fileTypes) ? fileTypes : [fileTypes];
+      }
+      
+      if (mimeTypes) {
+        searchParams.mimeTypes = Array.isArray(mimeTypes) ? mimeTypes : [mimeTypes];
+      }
+      
+      if (tags) {
+        searchParams.tags = Array.isArray(tags) ? tags : [tags];
+      }
+      
+      // Convert numeric parameters
+      if (minSize) {
+        searchParams.minSize = parseInt(minSize as string);
+      }
+      
+      if (maxSize) {
+        searchParams.maxSize = parseInt(maxSize as string);
+      }
+      
+      // Convert date parameters
+      if (createdBefore) {
+        searchParams.createdBefore = new Date(createdBefore as string);
+      }
+      
+      if (createdAfter) {
+        searchParams.createdAfter = new Date(createdAfter as string);
+      }
+      
+      if (updatedBefore) {
+        searchParams.updatedBefore = new Date(updatedBefore as string);
+      }
+      
+      if (updatedAfter) {
+        searchParams.updatedAfter = new Date(updatedAfter as string);
+      }
+      
+      // Process sort parameter
+      if (sort) {
+        const [field, direction] = (sort as string).split(':');
+        searchParams.sort = {
+          field,
+          direction: direction === 'desc' ? 'desc' : 'asc'
+        };
+      }
+      
+      const result = await this.fileService.searchFiles(roomId as string, userId, searchParams);
+      
+      res.json({
+        success: result.success,
+        data: result.success ? result.data : undefined,
+        message: !result.success ? result.message : undefined
       });
     } catch (error) {
       next(error);

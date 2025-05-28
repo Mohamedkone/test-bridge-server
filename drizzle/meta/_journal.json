@@ -8,6 +8,34 @@
       "when": 1746941495428,
       "tag": "0000_bumpy_screwball",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "5",
+      "when": 1747669561803,
+      "tag": "0001_tough_vengeance",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "5",
+      "when": 1747671352686,
+      "tag": "0002_outgoing_black_cat",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "5",
+      "when": 1747714364166,
+      "tag": "0003_clammy_wilson_fisk",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "5",
+      "when": 1747799338098,
+      "tag": "0004_bitter_multiple_man",
+      "breakpoints": true
     }
   ]
 }

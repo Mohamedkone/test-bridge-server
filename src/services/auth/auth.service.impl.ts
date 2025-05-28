@@ -4,11 +4,14 @@ import jwt from 'jsonwebtoken';
 import { v4 as uuidv4 } from 'uuid';
 import { AuthService, UserProfile, TokenValidationResult, TokenOptions, Session, AuthResult } from './auth.service';
 import { Auth0Service } from './auth0.service';
-import { UserRepository } from '../../repositories/user.repository';
+import { UserRepository } from '../../repositories/interfaces/user.repository';
 import { setValue, getValue, deleteKey } from '../../utils/redis';
 import { Logger } from '../../utils/logger';
 import { AuthenticationError, NotFoundError } from '../../utils/errors';
 import { env } from '../../config/env';
+import { AuthError, InvalidCredentialsError, UserInactiveError, UserNotFoundError } from '../../errors/auth.error';
+import bcrypt from 'bcryptjs';
+import { JwtService, JwtPayload } from './jwt.service';
 
 @injectable()
 export class AuthServiceImpl implements AuthService {
@@ -18,7 +21,8 @@ export class AuthServiceImpl implements AuthService {
   constructor(
     @inject('Auth0Service') private auth0Service: Auth0Service,
     @inject('UserRepository') private userRepository: UserRepository,
-    @inject('Logger') private logger: Logger
+    @inject('Logger') private logger: Logger,
+    @inject('JwtService') private jwtService: JwtService
   ) {}
   
   async validateToken(token: string): Promise<TokenValidationResult> {
@@ -39,7 +43,7 @@ export class AuthServiceImpl implements AuthService {
       
       // Check if user exists and is active
       const user = await this.userRepository.findById(decoded.userId);
-      if (!user || !user.isActive) {
+      if (!user || user.status !== 'active') {
         return { valid: false, error: 'User not found or inactive' };
       }
       
@@ -53,6 +57,14 @@ export class AuthServiceImpl implements AuthService {
       
       return { valid: false, error: 'Invalid token' };
     }
+  }
+  
+  async verifyToken(token: string): Promise<any> {
+    const result = await this.validateToken(token);
+    if (!result.valid || !result.userId) {
+      throw new AuthenticationError(result.error as string || 'Invalid token');
+    }
+    return this.userRepository.findById(result.userId);
   }
   
   async generateToken(userId: string, options?: TokenOptions): Promise<string> {
@@ -98,38 +110,50 @@ export class AuthServiceImpl implements AuthService {
       // Get user profile from Auth0
       const auth0Profile = await this.auth0Service.getUserProfile(auth0Token);
       
-      // Find or create user in our database
-      let user = await this.userRepository.findByAuth0Id(auth0Profile.auth0Id);
+      // Find user in our database by email first
+      let user = await this.userRepository.findByEmail(auth0Profile.email);
       
-      if (!user) {
-        // Create new user
-        user = await this.userRepository.create({
-          id: uuidv4(),
-          auth0Id: auth0Profile.auth0Id,
-          email: auth0Profile.email,
+      if (user) {
+        // Update existing user's profile
+        user = await this.userRepository.update(user.id, {
           firstName: auth0Profile.firstName,
           lastName: auth0Profile.lastName,
           profilePicture: auth0Profile.picture,
           emailVerified: auth0Profile.emailVerified,
-          isActive: true,
-          userType: 'b2c'
+          lastLoginAt: new Date(),
+          metadata: {
+            ...user.metadata,
+            auth0Id: auth0Profile.auth0Id,
+            picture: auth0Profile.picture
+          }
+        });
+        
+        this.logger.info('Existing user logged in via Auth0', { 
+          userId: user.id,
+          email: user.email
+        });
+      } else {
+        // Create new user
+        user = await this.userRepository.create({
+          id: uuidv4(),
+          email: auth0Profile.email,
+          password: '', // Auth0 handles authentication
+          firstName: auth0Profile.firstName,
+          lastName: auth0Profile.lastName,
+          profilePicture: auth0Profile.picture,
+          emailVerified: auth0Profile.emailVerified,
+          status: 'active',
+          userType: 'b2c',
+          lastLoginAt: new Date(),
+          metadata: {
+            auth0Id: auth0Profile.auth0Id,
+            picture: auth0Profile.picture
+          }
         });
         
         this.logger.info('New user created from Auth0 login', { 
           userId: user.id, 
           email: auth0Profile.email 
-        });
-      } else {
-        // Update existing user
-        user = await this.userRepository.update(user.id, {
-          firstName: auth0Profile.firstName,
-          lastName: auth0Profile.lastName,
-          profilePicture: auth0Profile.picture,
-          emailVerified: auth0Profile.emailVerified
-        });
-        
-        this.logger.info('Existing user updated from Auth0 login', { 
-          userId: user.id
         });
       }
       
@@ -153,7 +177,6 @@ export class AuthServiceImpl implements AuthService {
       };
     } catch (error:any) {
       this.logger.error('Auth0 login failed', { error: error.message });
-      
       throw new AuthenticationError('Authentication failed');
     }
   }
@@ -254,53 +277,135 @@ export class AuthServiceImpl implements AuthService {
   }
   
   async hasPermission(userId: string, resource: string, action: string): Promise<boolean> {
-    // Get user
     const user = await this.userRepository.findById(userId);
     if (!user) {
-      throw new NotFoundError('User', userId);
+      return false;
     }
     
-    // Implement your permission logic here
-    // This is a simplified example - you would typically check against a
-    // permission database or use a more sophisticated approach
-    
-    // For example, based on resource type:
-    const [resourceType, resourceId] = resource.split(':');
-    
-    if (resourceType === 'user') {
-      // Users can always access their own data
-      return resourceId === userId;
-    }
-    
-    if (resourceType === 'company') {
-      // Check if user belongs to company
-      // This would require additional repository methods
-      return true; // Simplified for now
-    }
-    
-    if (resourceType === 'room') {
-      // Check if user has access to room
-      // This would require additional repository methods
-      return true; // Simplified for now
-    }
-    
-    if (resourceType === 'file') {
-      // Check if user has access to file
-      // This would require additional repository methods
-      return true; // Simplified for now
-    }
-    
-    this.logger.warn('Unknown resource type in permission check', { 
-      resourceType, userId, action 
-    });
-    
-    // Default to false for unknown resource types
-    return false;
+    // TODO: Implement permission checking logic
+    return true;
   }
   
   async getUserRoles(userId: string): Promise<string[]> {
-    // Implementation would typically query a roles database
-    // This is a placeholder implementation
-    return ['user'];
+    const user = await this.userRepository.findById(userId);
+    if (!user) {
+      return [];
+    }
+    
+    return user.role ? [user.role] : [];
+  }
+  
+  async validateCredentials(email: string, password: string): Promise<{ token: string; user: any }> {
+    const user = await this.userRepository.findByEmail(email);
+    if (!user) {
+      throw new UserNotFoundError();
+    }
+
+    if (user.status !== 'active') {
+      throw new UserInactiveError();
+    }
+
+    const isValidPassword = await bcrypt.compare(password, user.password);
+    if (!isValidPassword) {
+      throw new InvalidCredentialsError();
+    }
+
+    const token = this.jwtService.generateToken({
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+    });
+
+    return { token, user };
+  }
+  
+  async refreshToken(token: string): Promise<{ token: string; user: any }> {
+    const payload = this.jwtService.verifyToken(token);
+    const user = await this.userRepository.findById(payload.sub);
+
+    if (!user) {
+      throw new UserNotFoundError();
+    }
+
+    if (user.status !== 'active') {
+      throw new UserInactiveError();
+    }
+
+    const newToken = this.jwtService.generateToken({
+      sub: user.id,
+      email: user.email,
+      role: user.role,
+    });
+
+    return { token: newToken, user };
+  }
+  
+  async handleAuth0Callback(auth0User: any): Promise<{ token: string; user: any }> {
+    try {
+      // Convert Auth0 user to our UserProfile format
+      const auth0Profile: UserProfile = {
+        auth0Id: auth0User.sub,
+        email: auth0User.email,
+        firstName: auth0User.given_name,
+        lastName: auth0User.family_name,
+        picture: auth0User.picture,
+        emailVerified: auth0User.email_verified
+      };
+
+      // Find user in our database by email first
+      let user = await this.userRepository.findByEmail(auth0Profile.email);
+      
+      if (user) {
+        // Update existing user's profile
+        user = await this.userRepository.update(user.id, {
+          firstName: auth0Profile.firstName,
+          lastName: auth0Profile.lastName,
+          profilePicture: auth0Profile.picture,
+          emailVerified: auth0Profile.emailVerified,
+          lastLoginAt: new Date(),
+          metadata: {
+            ...user.metadata,
+            auth0Id: auth0Profile.auth0Id,
+            picture: auth0Profile.picture
+          }
+        });
+        
+        this.logger.info('Existing user logged in via Auth0 callback', { 
+          userId: user.id,
+          email: user.email
+        });
+      } else {
+        // Create new user
+        user = await this.userRepository.create({
+          id: uuidv4(),
+          email: auth0Profile.email,
+          password: '', // Auth0 handles authentication
+          firstName: auth0Profile.firstName,
+          lastName: auth0Profile.lastName,
+          profilePicture: auth0Profile.picture,
+          emailVerified: auth0Profile.emailVerified,
+          status: 'active',
+          userType: 'b2c',
+          lastLoginAt: new Date(),
+          metadata: {
+            auth0Id: auth0Profile.auth0Id,
+            picture: auth0Profile.picture
+          }
+        });
+        
+        this.logger.info('New user created from Auth0 callback', { 
+          userId: user.id, 
+          email: auth0Profile.email 
+        });
+      }
+
+      // Generate token
+      const token = await this.generateToken(user.id);
+      
+      return { token, user };
+    } catch (error: any) {
+      this.logger.error('Auth0 callback failed', { error: error.message });
+      throw new AuthenticationError('Authentication failed');
+    }
   }
 }

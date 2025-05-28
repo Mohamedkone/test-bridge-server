@@ -109,8 +109,8 @@ export class AwsS3StorageProvider extends BaseStorageProvider {
             Bucket: this.bucketName,
             Key: key,
             ContentType: options.contentType || 'application/octet-stream',
-            ContentDisposition: options.contentDisposition,
-            Metadata: options.metadata
+            ContentDisposition: options.responseContentDisposition,
+            Metadata: options.acl?.public ? { public: 'true' } : undefined
           });
           break;
         case 'delete':
@@ -241,8 +241,8 @@ export class AwsS3StorageProvider extends BaseStorageProvider {
             key: item.Key!,
             name: fileName,
             size: item.Size || 0,
-            lastModified: item.LastModified,
-            etag: item.ETag?.replace(/"/g, ''), // Remove quotes from ETag
+            lastModified: item.LastModified || new Date(),
+            etag: item.ETag?.replace(/"/g, ''),
             isDirectory: false
           });
         }
@@ -284,7 +284,7 @@ export class AwsS3StorageProvider extends BaseStorageProvider {
           key,
           name: this.getFileNameFromKey(key),
           size: response.ContentLength || 0,
-          lastModified: response.LastModified,
+          lastModified: response.LastModified || new Date(),
           contentType: response.ContentType,
           etag: response.ETag?.replace(/"/g, ''),
           metadata: response.Metadata,
@@ -607,9 +607,11 @@ export class AwsS3StorageProvider extends BaseStorageProvider {
       const stats: StorageStats = {
         totalBytes: 0, // We don't know the total capacity
         usedBytes: totalSize,
-        availableBytes: 0, // AWS S3 has unlimited storage
+        availableBytes: 0, // Unknown
         fileCount,
-        lastUpdated: new Date()
+        lastUpdated: new Date(),
+        usageByType: {}, // We would need to scan all objects to calculate this
+        costEstimate: (totalSize / (1024 * 1024 * 1024)) * 0.023 // AWS S3 standard storage cost ($0.023 per GB)
       };
       
       return {

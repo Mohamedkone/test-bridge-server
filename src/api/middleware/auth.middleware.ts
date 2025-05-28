@@ -1,10 +1,10 @@
 // src/api/middleware/auth.middleware.ts
 import { Request, Response, NextFunction } from 'express';
-import { inject, injectable } from 'inversify';
+import { injectable, inject } from 'inversify';
 import { AuthService } from '../../services/auth/auth.service';
 import { UserRepository } from '../../repositories/user.repository';
 import { Logger } from '../../utils/logger';
-import { AuthenticationError, AuthorizationError } from '../../utils/errors';
+import { AuthenticationError, AuthorizationError, ValidationError } from '../../utils/errors';
 
 // Extend Express Request to include user
 declare global {
@@ -25,149 +25,86 @@ export class AuthMiddleware {
     @inject('AuthService') private readonly authService: AuthService,
     @inject('UserRepository') private readonly userRepository: UserRepository,
     @inject('Logger') private readonly logger: Logger
-  ) {}
+  ) {
+    this.logger = logger.createChildLogger('AuthMiddleware');
+  }
 
   /**
-   * Middleware to authenticate requests
+   * Verify JWT token
    */
-  authenticate = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  async verifyToken(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const authHeader = req.headers.authorization;
-      
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        throw new AuthenticationError('Missing or invalid authorization header');
+      const token = req.headers.authorization?.split(' ')[1];
+      if (!token) {
+        throw new ValidationError('Token is required');
       }
-      
-      const token = authHeader.split(' ')[1];
-      
-      // Validate token
-      const validationResult = await this.authService.validateToken(token);
-      
-      if (!validationResult.valid) {
-        throw new AuthenticationError(validationResult.error || 'Invalid token');
+
+      const user = await this.authService.verifyToken(token);
+      if (!user) {
+        throw new ValidationError('Invalid token');
       }
-      
-      // Attach user to request
-      if (validationResult.userId) {
-        const user = await this.userRepository.findById(validationResult.userId);
-        if (user) {
-          req.user = user;
-          
-          // Log authentication success
-          this.logger.debug('User authenticated successfully', { 
-            userId: user.id, 
-            path: req.path 
-          });
-        } else {
-          throw new AuthenticationError('User not found');
-        }
-      }
-      
+
+      req.user = user;
       next();
-    } catch (error:any) {
-      this.logger.warn('Authentication failed', {
-        error: error.message,
-        path: req.path,
-        ip: req.ip
+    } catch (error: any) {
+      this.logger.error('Token verification failed', { error });
+      res.status(401).json({
+        error: error.message || 'Authentication failed'
       });
-      
-      if (error instanceof AuthenticationError) {
-        res.status(401).json({
-          success: false,
-          error: {
-            code: 'UNAUTHORIZED',
-            message: error.message
-          }
-        });
-      } else {
-        res.status(500).json({
-          success: false,
-          error: {
-            code: 'SERVER_ERROR',
-            message: 'An error occurred during authentication'
-          }
-        });
-      }
     }
-  };
+  }
 
   /**
-   * Middleware to check for specific permissions
+   * Check if user has required role
    */
-  checkPermission = (resource: string, action: string) => {
+  hasRole(role: string) {
     return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
       try {
-        const userId = req.user?.id;
-        
-        if (!userId) {
-          throw new AuthenticationError('User not authenticated');
+        if (!req.user) {
+          throw new ValidationError('User not authenticated');
         }
-        
-        // Process resource string (e.g., "room:${req.params.roomId}")
-        const processedResource = resource.replace(/\${([^}]+)}/g, (_, param) => {
-          const parts = param.split('.');
-          let value = req as IndexableObject;
-          
-          for (const part of parts) {
-            if (!value || value[part] === undefined) {
-              return '';
-            }
-            value = value[part];
-          }
-          
-          return String(value);
-        });
-        
-        // Check permission
-        const hasPermission = await this.authService.hasPermission(userId, processedResource, action);
-        
-        if (!hasPermission) {
-          throw new AuthorizationError(`You do not have permission to ${action} this ${resource.split(':')[0]}`);
+
+        if (req.user.role !== role) {
+          throw new ValidationError('Insufficient permissions');
         }
-        
-        // Log permission check success
-        this.logger.debug('Permission check passed', {
-          userId,
-          resource: processedResource,
-          action
-        });
-        
+
         next();
-      } catch (error:any) {
-        this.logger.warn('Permission check failed', {
-          error: error.message,
-          resource,
-          action,
-          path: req.path,
-          userId: req.user?.id
+      } catch (error: any) {
+        this.logger.error('Role check failed', { error });
+        res.status(403).json({
+          error: error.message || 'Access denied'
         });
-        
-        if (error instanceof AuthenticationError) {
-          res.status(401).json({
-            success: false,
-            error: {
-              code: 'UNAUTHORIZED',
-              message: error.message
-            }
-          });
-        } else if (error instanceof AuthorizationError) {
-          res.status(403).json({
-            success: false,
-            error: {
-              code: 'FORBIDDEN',
-              message: error.message
-            }
-          });
-        } else {
-          res.status(500).json({
-            success: false,
-            error: {
-              code: 'SERVER_ERROR',
-              message: 'An error occurred during permission check'
-            }
-          });
-        }
       }
     };
-  };
+  }
+
+  /**
+   * Check if user has required permission
+   */
+  hasPermission(resource: string, action: string) {
+    return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+      try {
+        if (!req.user) {
+          throw new ValidationError('User not authenticated');
+        }
+
+        const hasPermission = await this.authService.hasPermission(
+          req.user.id,
+          resource,
+          action
+        );
+
+        if (!hasPermission) {
+          throw new ValidationError('Insufficient permissions');
+        }
+
+        next();
+      } catch (error: any) {
+        this.logger.error('Permission check failed', { error });
+        res.status(403).json({
+          error: error.message || 'Access denied'
+        });
+      }
+    };
+  }
 }

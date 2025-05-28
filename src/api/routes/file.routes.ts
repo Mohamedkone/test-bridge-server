@@ -1,40 +1,59 @@
 // src/api/routes/file.routes.ts
 import { Router } from 'express';
-import { container } from '../../config/container';
+import { injectable, inject } from 'inversify';
 import { FileController } from '../controllers/file.controller';
 import { AuthMiddleware } from '../middleware/auth.middleware';
 
-const fileController = container.get<FileController>(FileController);
-const authMiddleware = container.get<AuthMiddleware>(AuthMiddleware);
+@injectable()
+export class FileRoutes {
+  private router: Router;
 
-const router = Router();
+  constructor(
+    @inject('FileController') private fileController: FileController,
+    @inject('AuthMiddleware') private authMiddleware: AuthMiddleware
+  ) {
+    this.router = Router();
+    this.setupRoutes();
+  }
 
-// Public routes for file sharing
-router.get('/share/:token', fileController.getFileByShareToken.bind(fileController));
+  private setupRoutes(): void {
+    // Public routes for file sharing
+    this.router.get('/share/:token', this.fileController.getFileByShareToken.bind(this.fileController));
 
-// Protected routes - require authentication
-router.use(authMiddleware.authenticate);
+    // Protected routes - require authentication
+    this.router.use(this.authMiddleware.verifyToken.bind(this.authMiddleware));
 
-// File management
-router.get('/room/:roomId', fileController.getFiles.bind(fileController));
-router.get('/:id', fileController.getFile.bind(fileController));
-router.post('/folder', fileController.createFolder.bind(fileController));
-router.post('/upload', fileController.uploadFile);
-router.patch('/:id', fileController.updateFile.bind(fileController));
-router.delete('/:id', fileController.deleteFile.bind(fileController));
-router.post('/:id/restore', fileController.restoreFile.bind(fileController));
-router.get('/:id/download', fileController.getFileDownloadUrl.bind(fileController));
+    // File management
+    this.router.get('/room/:roomId', this.fileController.getFiles.bind(this.fileController));
+    this.router.get('/room/:roomId/search', this.fileController.searchFiles.bind(this.fileController));
+    this.router.get('/:id', this.fileController.getFile.bind(this.fileController));
+    this.router.get('/:id/content', this.fileController.getFileContent.bind(this.fileController));
+    this.router.post('/folder', this.fileController.createFolder.bind(this.fileController));
+    this.router.post('/upload', this.fileController.uploadFile);
+    this.router.patch('/:id', this.fileController.updateFile.bind(this.fileController));
+    this.router.delete('/:id', this.fileController.deleteFile.bind(this.fileController));
+    this.router.post('/:id/restore', this.fileController.restoreFile.bind(this.fileController));
+    this.router.get('/:id/download', this.fileController.getDownloadUrl.bind(this.fileController));
 
-// File sharing
-router.post('/:id/share', fileController.createFileShare.bind(fileController));
-router.delete('/share/:id', fileController.deleteFileShare.bind(fileController));
+    // Bulk operations
+    this.router.post('/bulk/move', this.fileController.moveFiles.bind(this.fileController));
+    this.router.post('/bulk/delete', this.fileController.deleteFiles.bind(this.fileController));
+    this.router.post('/bulk/copy', this.fileController.copyFiles.bind(this.fileController));
 
-// Multipart upload
-router.post('/upload/multipart', fileController.initMultipartUpload.bind(fileController));
-router.get('/upload/multipart/:uploadId/part', fileController.getUploadPartUrl.bind(fileController));
-router.post('/upload/multipart/:uploadId/part', fileController.completeUploadPart.bind(fileController));
-router.post('/upload/multipart/:uploadId/complete', fileController.completeMultipartUpload.bind(fileController));
-router.post('/upload/multipart/:uploadId/abort', fileController.abortMultipartUpload.bind(fileController));
-router.get('/upload/multipart/:uploadId/status', fileController.getUploadStatus.bind(fileController));
+    // File sharing
+    this.router.post('/:id/share', this.fileController.createFileShare.bind(this.fileController));
+    this.router.delete('/share/:id', this.fileController.deleteFileShare.bind(this.fileController));
 
-export default router;
+    // Multipart upload
+    this.router.post('/upload/multipart', this.fileController.initMultipartUpload.bind(this.fileController));
+    this.router.get('/upload/multipart/:uploadId/part', this.fileController.getUploadPartUrl.bind(this.fileController));
+    this.router.post('/upload/multipart/:uploadId/part', this.fileController.completeUploadPart.bind(this.fileController));
+    this.router.post('/upload/multipart/:uploadId/complete', this.fileController.completeMultipartUpload.bind(this.fileController));
+    this.router.post('/upload/multipart/:uploadId/abort', this.fileController.abortMultipartUpload.bind(this.fileController));
+    this.router.get('/upload/multipart/:uploadId/status', this.fileController.getUploadStatus.bind(this.fileController));
+  }
+
+  public getRouter(): Router {
+    return this.router;
+  }
+}

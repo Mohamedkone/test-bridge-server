@@ -1,7 +1,8 @@
 // src/services/storage/base-provider.ts
+import { injectable, inject } from 'inversify';
 import { Logger } from '../../utils/logger';
 import { 
-  StorageProvider, 
+  StorageProvider,
   StorageOperationResult, 
   SignedUrlOptions, 
   FolderOptions, 
@@ -17,15 +18,18 @@ import { StorageError } from './errors';
 /**
  * Abstract base implementation with common functionality
  */
+@injectable()
 export abstract class BaseStorageProvider implements StorageProvider {
-  protected credentials: any;
   protected initialized: boolean = false;
-  protected logger: Logger;
-  protected providerName: string;
+  protected credentials: any;
+  public readonly providerName: string;
   
-  constructor(logger: Logger, providerName: string) {
-    this.logger = logger.createChildLogger(this.constructor.name);
+  constructor(
+    @inject('Logger') protected logger: Logger,
+    providerName: string
+  ) {
     this.providerName = providerName;
+    this.logger = logger.createChildLogger(this.constructor.name);
   }
   
   abstract initialize(credentials: any): Promise<StorageOperationResult>;
@@ -41,6 +45,7 @@ export abstract class BaseStorageProvider implements StorageProvider {
   abstract completeMultipartUpload(key: string, uploadId: string, parts: any[]): Promise<StorageOperationResult>;
   abstract abortMultipartUpload(key: string, uploadId: string): Promise<StorageOperationResult>;
   abstract getStorageStats(): Promise<StorageOperationResult & { stats?: StorageStats }>;
+  abstract getFileContent(key: string, range?: { start: number; end: number }): Promise<StorageOperationResult & { data?: Buffer }>;
   
   /**
    * Validates that the provider is initialized
@@ -57,17 +62,17 @@ export abstract class BaseStorageProvider implements StorageProvider {
    */
   getCapabilities(): StorageProviderCapabilities {
     return {
-      supportsMultipartUpload: true,
-      supportsRangeRequests: true,
+      supportsMultipartUpload: false,
+      supportsRangeRequests: false,
       supportsServerSideEncryption: false,
       supportsVersioning: false,
-      supportsFolderCreation: true,
+      supportsFolderCreation: false,
       supportsTags: false,
-      supportsMetadata: true,
-      maximumFileSize: 5 * 1024 * 1024 * 1024, // 5GB default
-      maximumPartSize: 100 * 1024 * 1024, // 100MB default
-      minimumPartSize: 5 * 1024 * 1024, // 5MB default
-      maximumPartCount: 10000 // AWS S3 default
+      supportsMetadata: false,
+      maximumFileSize: 0,
+      maximumPartSize: 0,
+      minimumPartSize: 0,
+      maximumPartCount: 0
     };
   }
   
@@ -133,32 +138,23 @@ export abstract class BaseStorageProvider implements StorageProvider {
   }
   
   /**
-   * Utility method to retry operations with exponential backoff
-   * @param operation Function to retry
-   * @param maxRetries Maximum number of retries
-   * @param baseDelayMs Base delay in milliseconds
-   * @returns Result from the operation
+   * Retry operation with exponential backoff
    */
-  protected async retryOperation<T>(
-    operation: () => Promise<T>, 
-    maxRetries: number = 3, 
-    baseDelayMs: number = 1000
+  protected async withRetry<T>(
+    operation: () => Promise<T>,
+    options: { maxRetries?: number; baseDelayMs?: number } = {}
   ): Promise<T> {
-    let retries = 0;
+    const maxRetries = options.maxRetries || 3;
+    const baseDelayMs = options.baseDelayMs || 500;
     
-    while (true) {
+    for (let retries = 0; retries <= maxRetries; retries++) {
       try {
         return await operation();
-      } catch (error:any) {
-        retries++;
-        
-        // Check if we've reached max retries
-        if (retries >= maxRetries) {
-          this.logger.warn(`Operation failed after ${retries} retries`, { error });
+      } catch (error: any) {
+        if (retries === maxRetries) {
           throw error;
         }
         
-        // Calculate backoff delay
         const delayMs = baseDelayMs * Math.pow(2, retries - 1);
         
         this.logger.debug(`Retrying operation after ${delayMs}ms (attempt ${retries} of ${maxRetries})`, {
@@ -169,5 +165,8 @@ export abstract class BaseStorageProvider implements StorageProvider {
         await new Promise(resolve => setTimeout(resolve, delayMs));
       }
     }
+    
+    // This should never happen, but TypeScript needs a return
+    throw new Error('Unexpected retry failure');
   }
 }

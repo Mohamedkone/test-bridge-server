@@ -92,49 +92,33 @@ export class GcpStorageProvider extends BaseStorageProvider {
     try {
       this.validateInitialized();
       
-      const file = this.bucket!.file(key);
+      if (!this.bucketName) {
+        throw new Error('Bucket name is not defined');
+      }
       
-      const signOptions: any = {
-        expires: Date.now() + (options.expiresIn * 1000),
-        contentType: options.contentType || undefined
+      const signedUrlOptions: any = {
+        version: 'v4',
+        action: options.operation === 'read' ? 'read' : 'write',
+        expires: Date.now() + ((options.expiresIn || 3600) * 1000)
       };
       
-      // Add content disposition if provided
-      if (options.contentDisposition) {
-        signOptions.responseDisposition = options.contentDisposition;
+      // Only include contentType if it's defined
+      if (options.contentType) {
+        signedUrlOptions.contentType = options.contentType;
       }
       
-      let url: string;
-      
-      if (options.operation === 'read') {
-        // Generate signed URL for reading
-        const [urlResult] = await file.getSignedUrl({
-          action: 'read',
-          ...signOptions
-        });
-        url = urlResult;
-      } else if (options.operation === 'write') {
-        // Generate signed URL for writing
-        const [urlResult] = await file.getSignedUrl({
-          action: 'write',
-          ...signOptions
-        });
-        url = urlResult;
-      } else {
-        throw new Error(`Unsupported operation: ${options.operation}`);
-      }
+      const [url] = await this.storage!.bucket(this.bucketName).file(key).getSignedUrl(signedUrlOptions);
       
       return {
         success: true,
-        url,
-        message: 'Signed URL generated successfully'
+        url
       };
     } catch (error: any) {
       this.logger.error('Failed to generate signed URL', { key, error });
       return {
         success: false,
         message: 'Failed to generate signed URL',
-        error: new StorageProviderError('Google Cloud Storage', 'getSignedUrl', error)
+        error: new StorageProviderError('gcp-storage', 'getSignedUrl', error)
       };
     }
   }
@@ -517,11 +501,13 @@ export class GcpStorageProvider extends BaseStorageProvider {
       }
       
       const stats: StorageStats = {
-        totalBytes: 0, // GCS doesn't have a fixed limit
+        totalBytes: 0, // We don't know the total capacity
         usedBytes: totalSize,
-        availableBytes: 0, // Unlimited
+        availableBytes: 0, // Unknown
         fileCount,
-        lastUpdated: new Date()
+        lastUpdated: new Date(),
+        usageByType: {}, // We would need to scan all objects to calculate this
+        costEstimate: (totalSize / (1024 * 1024 * 1024)) * 0.02 // GCP Cloud Storage standard cost ($0.02 per GB)
       };
       
       return {
@@ -573,5 +559,50 @@ export class GcpStorageProvider extends BaseStorageProvider {
     }
     
     return result;
+  }
+  
+  /**
+   * Get file content with optional range support
+   */
+  async getFileContent(key: string, range?: { start: number; end: number }): Promise<StorageOperationResult & { data?: Buffer }> {
+    try {
+      this.validateInitialized();
+      
+      const file = this.bucket!.file(key);
+      
+      try {
+        // Set up options for file download
+        const options: any = {};
+        
+        // If range is specified, add it to options
+        if (range) {
+          options.start = range.start;
+          options.end = range.end;
+        }
+        
+        // Download the file content
+        const [fileContent] = await file.download(options);
+        
+        // Return the buffer
+        return {
+          success: true,
+          data: Buffer.from(fileContent)
+        };
+      } catch (error: any) {
+        // Check if the error is because the file doesn't exist
+        if (error.code === 404) {
+          throw new StorageNotFoundError('Google Cloud Storage', key);
+        }
+        throw error;
+      }
+    } catch (error: any) {
+      this.logger.error('Failed to get file content', { key, range, error });
+      
+      if (error instanceof StorageNotFoundError) {
+        throw error;
+      }
+      
+      throw new StorageProviderError('Google Cloud Storage', 'getFileContent', error);
+    }
   }
 }

@@ -1,27 +1,278 @@
 // src/services/storage/storage.service.ts
-import { injectable, inject } from 'inversify';
+import { injectable, inject, multiInject } from 'inversify';
 import { Logger } from '../../utils/logger';
 import { StorageProviderFactory, StorageProvider, StorageProviderType, StorageOperationResult, StorageStats } from './types';
-import { StorageError, StorageProviderError, StorageAuthError } from './errors';
+import { StorageError, StorageProviderError, StorageAuthError, StorageQuotaExceededError } from './errors';
 import { StorageAccountRepository, StorageAccount } from '../../repositories/storage-account.repository';
+import { BaseStorageProvider } from './base-provider';
+import { GoogleDriveStorageProvider } from './providers/google-drive-provider';
+import { DropboxStorageProvider } from './providers/dropbox-provider';
+import { S3StorageProvider } from './providers/s3-provider';
+import { 
+  StorageCredentials,
+  SignedUrlOptions,
+  FolderOptions,
+  ListOptions,
+  DeleteOptions,
+  UploadOptions,
+  FileMetadata,
+  StorageProviderCapabilities,
+  ProgressCallback,
+  ProgressInfo
+} from './types';
+import { Readable } from 'stream';
 
 @injectable()
 export class StorageService {
-  private providerInstances: Map<string, StorageProvider> = new Map();
+  private providers: Map<string, BaseStorageProvider> = new Map();
+  private activeProvider?: BaseStorageProvider;
+  private storageStats: Map<string, { stats: StorageStats, lastUpdated: Date }> = new Map();
+  // Update stats every 15 minutes
+  private statsRefreshInterval = 15 * 60 * 1000;
+  private quotaThresholdPercent = 90; // Alert when storage is 90% full
   
   constructor(
     @inject('StorageProviderFactory') private providerFactory: StorageProviderFactory,
     @inject('StorageAccountRepository') private storageAccountRepository: StorageAccountRepository,
-    @inject('Logger') private logger: Logger
+    @inject('Logger') private logger: Logger,
+    @multiInject('GoogleDriveStorageProvider') googleDriveProvider: GoogleDriveStorageProvider,
+    @multiInject('DropboxStorageProvider') dropboxProvider: DropboxStorageProvider,
+    @multiInject('S3StorageProvider') s3Provider: S3StorageProvider
   ) {
     this.logger = logger.createChildLogger('StorageService');
+    
+    // Register providers
+    this.providers.set('google_drive', googleDriveProvider);
+    this.providers.set('dropbox', dropboxProvider);
+    this.providers.set('s3', s3Provider);
+  }
+  
+  /**
+   * Initialize the service and set up periodic stats refresh
+   */
+  async initialize(): Promise<void> {
+    // Set up periodic storage stats refresh
+    setInterval(() => this.refreshAllStorageStats(), this.statsRefreshInterval);
+    
+    // Initial refresh of storage stats
+    this.refreshAllStorageStats();
+  }
+  
+  /**
+   * Refresh storage stats for all connected storage accounts
+   */
+  private async refreshAllStorageStats(): Promise<void> {
+    try {
+      // Use findByCompanyId with a special value to get all accounts
+      const accounts = await this.storageAccountRepository.findByCompanyId('*');
+      
+      for (const account of accounts) {
+        try {
+          // Skip accounts that were recently updated
+          const cachedStats = this.storageStats.get(account.id);
+          if (cachedStats && (Date.now() - cachedStats.lastUpdated.getTime() < this.statsRefreshInterval)) {
+            continue;
+          }
+          
+          const provider = await this.getStorageProvider(account.id);
+          const result = await provider.getStorageStats();
+          
+          if (result.success && result.stats) {
+            this.storageStats.set(account.id, {
+              stats: result.stats,
+              lastUpdated: new Date()
+            });
+            
+            // Check if storage is nearing quota limits
+            this.checkQuotaThresholds(account.id, result.stats);
+          }
+        } catch (error) {
+          this.logger.error(`Failed to refresh stats for storage account ${account.id}`, { error });
+        }
+      }
+    } catch (error) {
+      this.logger.error('Failed to refresh storage stats', { error });
+    }
+  }
+  
+  /**
+   * Check if storage is approaching quota limits
+   */
+  private checkQuotaThresholds(accountId: string, stats: StorageStats): void {
+    if (!stats.totalBytes || !stats.usedBytes) {
+      return;
+    }
+    
+    const usedPercent = (stats.usedBytes / stats.totalBytes) * 100;
+    
+    if (usedPercent >= this.quotaThresholdPercent) {
+      this.logger.warn(`Storage quota threshold exceeded for account ${accountId}`, {
+        usedBytes: stats.usedBytes,
+        totalBytes: stats.totalBytes,
+        usedPercent,
+        threshold: this.quotaThresholdPercent
+      });
+      
+      // TODO: Emit event or send notification
+    }
+  }
+  
+  /**
+   * Get storage stats with optional refresh
+   */
+  async getStorageStats(storageId: string, forceRefresh = false): Promise<StorageStats> {
+    // Check if we have cached stats and they're fresh enough
+    const cachedStats = this.storageStats.get(storageId);
+    if (!forceRefresh && cachedStats && (Date.now() - cachedStats.lastUpdated.getTime() < this.statsRefreshInterval)) {
+      return cachedStats.stats;
+    }
+    
+    // Get fresh stats
+    const provider = await this.getStorageProvider(storageId);
+    const result = await provider.getStorageStats();
+    
+    if (!result.success || !result.stats) {
+      throw new StorageError(`Failed to get storage stats for account ${storageId}`);
+    }
+    
+    // Cache the stats
+    this.storageStats.set(storageId, {
+      stats: result.stats,
+      lastUpdated: new Date()
+    });
+    
+    // Check quota thresholds
+    this.checkQuotaThresholds(storageId, result.stats);
+    
+    return result.stats;
+  }
+  
+  /**
+   * Get all storage accounts with usage information
+   */
+  async getStorageAccountsWithUsage(companyId: string): Promise<(StorageAccount & { usage?: StorageStats })[]> {
+    const accounts = await this.getStorageAccounts(companyId);
+    
+    // Enhance each account with usage information
+    const accountsWithUsage = await Promise.all(accounts.map(async (account) => {
+      try {
+        const stats = await this.getStorageStats(account.id, false);
+        return {
+          ...account,
+          usage: stats
+        };
+      } catch (error) {
+        this.logger.error(`Failed to get storage stats for account ${account.id}`, { error });
+        return account;
+      }
+    }));
+    
+    return accountsWithUsage;
+  }
+  
+  /**
+   * Check if an operation would exceed storage quota
+   */
+  async checkStorageQuota(storageId: string, sizeBytes: number): Promise<boolean> {
+    try {
+      const stats = await this.getStorageStats(storageId);
+      
+      if (!stats.totalBytes) {
+        // If total bytes is not defined, assume unlimited
+        return true;
+      }
+      
+      // Check if adding the new file would exceed quota
+      const projectedUsage = stats.usedBytes + sizeBytes;
+      
+      if (projectedUsage > stats.totalBytes) {
+        this.logger.warn(`Storage quota would be exceeded for account ${storageId}`, {
+          currentUsage: stats.usedBytes,
+          requestedSize: sizeBytes,
+          projectedUsage,
+          totalQuota: stats.totalBytes
+        });
+        
+        // Return false if operation would exceed quota
+        return false;
+      }
+      
+      return true;
+    } catch (error) {
+      this.logger.error(`Failed to check storage quota for account ${storageId}`, { error });
+      // Default to allowing the operation if we can't check quota
+      return true;
+    }
+  }
+  
+  /**
+   * Upload file with quota check and progress tracking
+   */
+  async uploadFile(
+    storageId: string,
+    path: string,
+    fileName: string,
+    content: Buffer | Readable,
+    options?: UploadOptions & { onProgress?: ProgressCallback }
+  ): Promise<FileMetadata> {
+    const provider = await this.getStorageProvider(storageId);
+    
+    // Check if the provider supports direct uploads
+    if ('uploadFile' in provider) {
+      // Check content size if it's a buffer
+      if (Buffer.isBuffer(content)) {
+        // Check if upload would exceed quota
+        const hasQuota = await this.checkStorageQuota(storageId, content.length);
+        
+        if (!hasQuota) {
+          throw new StorageQuotaExceededError(storageId);
+        }
+      }
+      
+      // Use provider's upload method with progress tracking
+      const result = await (provider as any).uploadFile(path, fileName, content, options);
+      
+      if (!result.success) {
+        throw new StorageError(`Failed to upload file: ${result.message}`);
+      }
+      
+      // Update storage stats after successful upload
+      setTimeout(() => this.refreshAllStorageStats(), 1000);
+      
+      return {
+        key: result.fileId || result.data?.id,
+        name: fileName,
+        size: Buffer.isBuffer(content) ? content.length : (result.data?.size || 0),
+        lastModified: new Date(),
+        contentType: options?.contentType || 'application/octet-stream',
+        isDirectory: false,
+        metadata: result.data
+      };
+    } else {
+      // Fall back to generic upload approach
+      throw new StorageError(`Direct upload not supported for provider ${provider.providerName}`);
+    }
+  }
+  
+  /**
+   * Get all storage accounts for a company
+   */
+  async getStorageAccounts(companyId: string): Promise<StorageAccount[]> {
+    return this.storageAccountRepository.findByCompanyId(companyId);
+  }
+  
+  /**
+   * Get a specific storage account
+   */
+  async getStorageAccount(id: string): Promise<StorageAccount | null> {
+    return this.storageAccountRepository.findById(id);
   }
   
   /**
    * Get available storage provider types
    */
-  getProviderTypes(): StorageProviderType[] {
-    return this.providerFactory.getAvailableProviders();
+  getAvailableProviders(): string[] {
+    return Array.from(this.providers.keys());
   }
   
   /**
@@ -30,8 +281,8 @@ export class StorageService {
    */
   async getStorageProvider(storageId: string): Promise<StorageProvider> {
     // Check if provider is already instantiated
-    if (this.providerInstances.has(storageId)) {
-      return this.providerInstances.get(storageId)!;
+    if (this.providers.has(storageId)) {
+      return this.providers.get(storageId)!;
     }
     
     // Fetch storage account from database
@@ -81,23 +332,9 @@ export class StorageService {
     }
     
     // Cache the provider instance
-    this.providerInstances.set(storageId, provider);
+    this.providers.set(storageId, provider);
     
     return provider;
-  }
-  
-  /**
-   * Get storage account by ID
-   */
-  async getStorageAccount(storageId: string): Promise<StorageAccount | null> {
-    return this.storageAccountRepository.findById(storageId);
-  }
-  
-  /**
-   * Get storage accounts for a company
-   */
-  async getCompanyStorageAccounts(companyId: string): Promise<StorageAccount[]> {
-    return this.storageAccountRepository.findByCompanyId(companyId);
   }
   
   /**
@@ -166,7 +403,7 @@ export class StorageService {
       await this.storageAccountRepository.saveCredentials(storageAccount.id, data.credentials);
       
       // Cache the provider instance
-      this.providerInstances.set(storageAccount.id, tempProvider);
+      this.providers.set(storageAccount.id, tempProvider);
       
       return storageAccount;
     } catch (error: any) {
@@ -175,12 +412,7 @@ export class StorageService {
         type: data.storageType,
         error: error.message
       });
-      
-      if (error instanceof StorageError) {
-        throw error;
-      }
-      
-      throw new StorageError(`Failed to create storage account: ${error.message}`);
+      throw error;
     }
   }
   
@@ -233,11 +465,15 @@ export class StorageService {
         throw new StorageError(`Storage account not found: ${id}`);
       }
       
-      // Remove the provider instance from cache
-      this.providerInstances.delete(id);
-      
       // Delete the account
-      return await this.storageAccountRepository.delete(id);
+      const success = await this.storageAccountRepository.delete(id);
+      
+      if (success) {
+        // Remove from provider cache
+        this.providers.delete(id);
+      }
+      
+      return success;
     } catch (error: any) {
       this.logger.error('Failed to delete storage account', {
         storageId: id,
@@ -295,14 +531,14 @@ export class StorageService {
       await this.storageAccountRepository.saveCredentials(storageId, credentials);
       
       // Remove the existing provider instance from cache
-      this.providerInstances.delete(storageId);
+      this.providers.delete(storageId);
       
       // Cache the new provider instance
-      this.providerInstances.set(storageId, tempProvider);
+      this.providers.set(storageId, tempProvider);
       
       return true;
     } catch (error: any) {
-      this.logger.error('Failed to update storage credentials', {
+      this.logger.error('Failed to update credentials', {
         storageId,
         error: error.message
       });
@@ -311,7 +547,7 @@ export class StorageService {
         throw error;
       }
       
-      throw new StorageError(`Failed to update storage credentials: ${error.message}`);
+      throw new StorageError(`Failed to update credentials: ${error.message}`);
     }
   }
   
@@ -361,26 +597,165 @@ export class StorageService {
       this.logger.error(`Connection test failed for storage account ${storageId}`, { error });
       return {
         success: false,
-        message: error.message || 'Connection test failed',
-        error
+        message: error.message || 'Connection test failed'
       };
     }
   }
   
-  /**
-   * Get storage usage statistics
-   */
-  async getStorageUsage(storageId: string): Promise<StorageOperationResult & { stats?: StorageStats }> {
-    try {
-      const provider = await this.getStorageProvider(storageId);
-      return await provider.getStorageStats();
-    } catch (error: any) {
-      this.logger.error(`Failed to get storage statistics for account ${storageId}`, { error });
-      return {
-        success: false,
-        message: error.message || 'Failed to get storage statistics',
-        error
-      };
+  async initializeProvider(type: string, credentials: StorageCredentials): Promise<void> {
+    const provider = this.providers.get(type);
+    if (!provider) {
+      throw new StorageProviderError(type, 'initialize', new Error(`Provider ${type} not found`));
     }
+
+    try {
+      await provider.initialize(credentials);
+      this.activeProvider = provider;
+    } catch (error: any) {
+      throw new StorageAuthError(type, error);
+    }
+  }
+
+  async testActiveProviderConnection(): Promise<boolean> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'testConnection', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.testConnection();
+    return result.success;
+  }
+
+  async getSignedUrl(key: string, options: SignedUrlOptions): Promise<string> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'getSignedUrl', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.getSignedUrl(key, options);
+    if (!result.success || !result.url) {
+      throw new StorageProviderError('storage', 'getSignedUrl', new Error(result.message || 'Failed to get signed URL'));
+    }
+
+    return result.url;
+  }
+
+  async createFolder(path: string, folderName: string, options?: FolderOptions): Promise<void> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'createFolder', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.createFolder(path, folderName, options);
+    if (!result.success) {
+      throw new StorageProviderError('storage', 'createFolder', new Error(result.message || 'Failed to create folder'));
+    }
+  }
+
+  async listFiles(path: string, options?: ListOptions): Promise<FileMetadata[]> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'listFiles', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.listFiles(path, options);
+    if (!result.success || !result.files) {
+      throw new StorageProviderError('storage', 'listFiles', new Error(result.message || 'Failed to list files'));
+    }
+
+    return result.files;
+  }
+
+  async getFileMetadata(key: string): Promise<FileMetadata> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'getFileMetadata', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.getFileMetadata(key);
+    if (!result.success || !result.metadata) {
+      throw new StorageProviderError('storage', 'getFileMetadata', new Error(result.message || 'Failed to get file metadata'));
+    }
+
+    return result.metadata;
+  }
+
+  async deleteFile(key: string, options?: DeleteOptions): Promise<void> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'deleteFile', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.deleteFile(key, options);
+    if (!result.success) {
+      throw new StorageProviderError('storage', 'deleteFile', new Error(result.message || 'Failed to delete file'));
+    }
+  }
+
+  async fileExists(key: string): Promise<boolean> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'fileExists', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.fileExists(key);
+    if (!result.success) {
+      throw new StorageProviderError('storage', 'fileExists', new Error(result.message || 'Failed to check file existence'));
+    }
+
+    return result.exists || false;
+  }
+
+  async createMultipartUpload(key: string, options?: UploadOptions): Promise<string> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'createMultipartUpload', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.createMultipartUpload(key, options);
+    if (!result.success || !result.uploadId) {
+      throw new StorageProviderError('storage', 'createMultipartUpload', new Error(result.message || 'Failed to create multipart upload'));
+    }
+
+    return result.uploadId;
+  }
+
+  async getSignedUrlForPart(key: string, uploadId: string, partNumber: number, contentLength: number): Promise<string> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'getSignedUrlForPart', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.getSignedUrlForPart(key, uploadId, partNumber, contentLength);
+    if (!result.success || !result.url) {
+      throw new StorageProviderError('storage', 'getSignedUrlForPart', new Error(result.message || 'Failed to get signed URL for part'));
+    }
+
+    return result.url;
+  }
+
+  async completeMultipartUpload(key: string, uploadId: string, parts: any[]): Promise<void> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'completeMultipartUpload', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.completeMultipartUpload(key, uploadId, parts);
+    if (!result.success) {
+      throw new StorageProviderError('storage', 'completeMultipartUpload', new Error(result.message || 'Failed to complete multipart upload'));
+    }
+  }
+
+  async abortMultipartUpload(key: string, uploadId: string): Promise<void> {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'abortMultipartUpload', new Error('No active provider'));
+    }
+
+    const result = await this.activeProvider.abortMultipartUpload(key, uploadId);
+    if (!result.success) {
+      throw new StorageProviderError('storage', 'abortMultipartUpload', new Error(result.message || 'Failed to abort multipart upload'));
+    }
+  }
+
+  getActiveProvider(): string | undefined {
+    return this.activeProvider ? this.activeProvider.providerName : undefined;
+  }
+
+  getProviderCapabilities(): StorageProviderCapabilities {
+    if (!this.activeProvider) {
+      throw new StorageProviderError('storage', 'getProviderCapabilities', new Error('No active provider'));
+    }
+
+    return this.activeProvider.getCapabilities();
   }
 }

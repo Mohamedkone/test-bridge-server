@@ -1,7 +1,8 @@
 // src/api/controllers/auth.controller.ts
 import { Request, Response, NextFunction } from 'express';
-import { inject, injectable } from 'inversify';
+import { injectable, inject } from 'inversify';
 import { AuthService } from '../../services/auth/auth.service';
+import { Auth0Service } from '../../services/auth/auth0.service';
 import { Logger } from '../../utils/logger';
 import { ValidationError, AuthenticationError } from '../../utils/errors';
 
@@ -9,27 +10,64 @@ import { ValidationError, AuthenticationError } from '../../utils/errors';
 export class AuthController {
   constructor(
     @inject('AuthService') private readonly authService: AuthService,
+    @inject('Auth0Service') private readonly auth0Service: Auth0Service,
     @inject('Logger') private readonly logger: Logger
-  ) {}
+  ) {
+    this.logger = logger.createChildLogger('AuthController');
+  }
 
   /**
    * Login with Auth0 token
    */
-  async login(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async login(req: Request, res: Response): Promise<void> {
     try {
       const { idToken } = req.body;
       
       if (!idToken) {
-        throw new ValidationError('ID token is required');
+        res.status(400).json({
+          success: false,
+          error: {
+            code: 'INVALID_REQUEST',
+            message: 'ID token is required'
+          }
+        });
+        return;
+      }
+
+      const result = await this.authService.processAuth0Login(idToken);
+      
+      res.json({
+        success: true,
+        data: result
+      });
+    } catch (error: any) {
+      this.logger.error('Login failed', { error });
+      res.status(401).json({
+        success: false,
+        error: {
+          code: 'AUTHENTICATION_FAILED',
+          message: error.message || 'Authentication failed'
+        }
+      });
+    }
+  }
+
+  /**
+   * Exchange Auth0 code for tokens (Authorization Code flow)
+   */
+  async exchangeCode(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { code, redirectUri } = req.body;
+      
+      if (!code || !redirectUri) {
+        throw new ValidationError('Code and redirect URI are required');
       }
       
-      // Process Auth0 login
-      const authResult = await this.authService.processAuth0Login(idToken);
+      // Exchange code for tokens
+      const tokens = await this.auth0Service.exchangeCodeForTokens(code, redirectUri);
       
-      // Set cookie with the session ID if applicable
-      if (authResult.success && authResult.user) {
-        this.logger.info('User logged in successfully', { userId: authResult.user.id });
-      }
+      // Process Auth0 login with the ID token
+      const authResult = await this.authService.processAuth0Login(tokens.id_token);
       
       res.json({
         success: true,
@@ -37,7 +75,13 @@ export class AuthController {
           user: authResult.user,
           token: authResult.token,
           expiresIn: authResult.expiresIn,
-          refreshToken: authResult.refreshToken
+          refreshToken: authResult.refreshToken,
+          auth0: {
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+            id_token: tokens.id_token,
+            expires_in: tokens.expires_in
+          }
         }
       });
     } catch (error) {
@@ -46,79 +90,77 @@ export class AuthController {
   }
 
   /**
-   * Get current user profile
+   * Get user profile
    */
-  async getProfile(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getProfile(req: Request, res: Response): Promise<void> {
     try {
-      // User will be attached to request by auth middleware
-      const userId = req.user?.id;
+      const token = req.headers.authorization?.split(' ')[1];
       
-      if (!userId) {
-        throw new AuthenticationError('User not authenticated');
+      if (!token) {
+        res.status(401).json({
+          success: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message: 'No token provided'
+          }
+        });
+        return;
       }
-      
-      // Fetch user's sessions
-      const sessions = await this.authService.getUserSessions(userId);
+
+      const user = await this.authService.verifyToken(token);
       
       res.json({
         success: true,
-        data: {
-          user: req.user,
-          sessions: sessions.map(s => ({
-            id: s.id,
-            createdAt: s.createdAt,
-            lastActiveAt: s.lastActiveAt
-          }))
+        data: user
+      });
+    } catch (error: any) {
+      this.logger.error('Get profile failed', { error });
+      res.status(401).json({
+        success: false,
+        error: {
+          code: 'AUTHENTICATION_FAILED',
+          message: error.message || 'Failed to get profile'
         }
       });
-    } catch (error) {
-      next(error);
     }
   }
 
   /**
-   * Logout - revoke the current token
+   * Logout user
    */
-  async logout(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async logout(req: Request, res: Response): Promise<void> {
     try {
-      // Extract token from Authorization header
-      const authHeader = req.headers.authorization;
-      if (!authHeader || !authHeader.startsWith('Bearer ')) {
-        throw new ValidationError('Invalid authorization header');
-      }
+      const token = req.headers.authorization?.split(' ')[1];
       
-      const token = authHeader.split(' ')[1];
-      
-      // Log the user ID
-      const userId = req.user?.id;
-      this.logger.info('Logout requested', { userId });
-      
-      // Revoke token
-      await this.authService.revokeToken(token);
-      
-      // If session ID is provided in body (optional), also revoke the session
-      if (req.body && req.body.sessionId) {
-        await this.authService.revokeSession(req.body.sessionId);
-        this.logger.info('Session revoked during logout', { 
-          sessionId: req.body.sessionId, 
-          userId 
+      if (!token) {
+        res.status(401).json({
+          success: false,
+          error: {
+            code: 'UNAUTHORIZED',
+            message: 'No token provided'
+          }
         });
+        return;
       }
-      
-      this.logger.info('User logged out successfully', { userId });
+
+      await this.authService.revokeToken(token);
       
       res.json({
         success: true,
         message: 'Logged out successfully'
       });
-    } catch (error:any) {
-      this.logger.error('Logout failed', { 
-        error: error.message, 
-        userId: req.user?.id 
+    } catch (error: any) {
+      this.logger.error('Logout failed', { error });
+      res.status(500).json({
+        success: false,
+        error: {
+          code: 'LOGOUT_FAILED',
+          message: error.message || 'Logout failed'
+        }
       });
-      next(error);
     }
   }
+
   /**
    * Revoke a specific session
    */
@@ -148,6 +190,33 @@ export class AuthController {
       res.json({
         success,
         message: success ? 'Session revoked successfully' : 'Failed to revoke session'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Validate a token (client-side validation)
+   */
+  async validateToken(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { token } = req.body;
+      
+      if (!token) {
+        throw new ValidationError('Token is required');
+      }
+      
+      // Validate token
+      const validationResult = await this.authService.validateToken(token);
+      
+      res.json({
+        success: true,
+        data: {
+          valid: validationResult.valid,
+          userId: validationResult.userId,
+          error: validationResult.error
+        }
       });
     } catch (error) {
       next(error);

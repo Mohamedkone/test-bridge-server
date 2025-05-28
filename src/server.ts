@@ -6,6 +6,8 @@ import { initializeSocketIO } from './socket';
 import { testDatabaseConnection } from './db/client';
 import { connectToRedis } from './utils/redis';
 import { Logger } from './utils/logger';
+import { WebSocketService } from './services/websocket/websocket.service';
+import { container } from './config/container';
 
 // Create logger
 const logger = new Logger('server');
@@ -15,6 +17,10 @@ const server = http.createServer(app);
 
 // Initialize Socket.IO
 const io = initializeSocketIO(server);
+
+// Initialize WebSocket
+const webSocketService = container.get<WebSocketService>('WebSocketService');
+webSocketService.initialize(server);
 
 // Start the server
 const startServer = async () => {

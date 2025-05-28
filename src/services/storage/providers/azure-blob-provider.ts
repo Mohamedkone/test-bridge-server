@@ -104,7 +104,7 @@ export class AzureBlobStorageProvider extends BaseStorageProvider {
       
       // Create start and expiry time
       const startsOn = new Date();
-      const expiresOn = new Date(Date.now() + options.expiresIn * 1000);
+      const expiresOn = new Date(Date.now() + (options.expiresIn || 3600) * 1000);
       
       let url: string;
       
@@ -307,7 +307,7 @@ export class AzureBlobStorageProvider extends BaseStorageProvider {
           key,
           name: this.getFileNameFromKey(key),
           size: properties.contentLength || 0,
-          lastModified: properties.lastModified,
+          lastModified: properties.lastModified || new Date(),
           contentType: properties.contentType,
           etag: properties.etag?.replace(/"/g, ''),
           metadata: properties.metadata,
@@ -577,11 +577,13 @@ export class AzureBlobStorageProvider extends BaseStorageProvider {
       }
       
       const stats: StorageStats = {
-        totalBytes: 0, // Azure doesn't expose a storage limit
+        totalBytes: 0, // We don't know the total capacity
         usedBytes: totalSize,
-        availableBytes: 0, // Not applicable
+        availableBytes: 0, // Unknown
         fileCount,
-        lastUpdated: new Date()
+        lastUpdated: new Date(),
+        usageByType: {}, // We would need to scan all objects to calculate this
+        costEstimate: (totalSize / (1024 * 1024 * 1024)) * 0.018 // Azure Blob Storage LRS cost ($0.018 per GB)
       };
       
       return {
@@ -596,6 +598,64 @@ export class AzureBlobStorageProvider extends BaseStorageProvider {
         message: 'Failed to get storage statistics',
         error: new StorageProviderError('Azure Blob Storage', 'getStorageStats', error)
       };
+    }
+  }
+  
+  /**
+   * Get file content with optional range support
+   */
+  async getFileContent(key: string, range?: { start: number; end: number }): Promise<StorageOperationResult & { data?: Buffer }> {
+    try {
+      this.validateInitialized();
+      
+      const blobClient = this.containerClient!.getBlobClient(key);
+      
+      try {
+        // Download options with optional range
+        const downloadOptions = range ? {
+          rangeStart: range.start,
+          rangeEnd: range.end
+        } : undefined;
+        
+        // Download the blob
+        const downloadResponse = await blobClient.download(
+          range ? range.start : 0,
+          range ? (range.end - range.start + 1) : undefined
+        );
+        
+        if (!downloadResponse.readableStreamBody) {
+          throw new Error('No readable stream in response');
+        }
+        
+        // Convert stream to buffer
+        const chunks: Buffer[] = [];
+        const stream = downloadResponse.readableStreamBody;
+        
+        return new Promise((resolve, reject) => {
+          stream.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+          stream.on('error', (err: Error) => reject(err));
+          stream.on('end', () => {
+            resolve({
+              success: true,
+              data: Buffer.concat(chunks)
+            });
+          });
+        });
+      } catch (error: any) {
+        // Check if the error is because the blob doesn't exist
+        if (error.statusCode === 404) {
+          throw new StorageNotFoundError('Azure Blob Storage', key);
+        }
+        throw error;
+      }
+    } catch (error: any) {
+      this.logger.error('Failed to get file content', { key, range, error });
+      
+      if (error instanceof StorageNotFoundError) {
+        throw error;
+      }
+      
+      throw new StorageProviderError('Azure Blob Storage', 'getFileContent', error);
     }
   }
   

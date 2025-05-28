@@ -5,7 +5,7 @@ export interface UserProfile {
     email: string;
     firstName: string;
     lastName: string;
-    picture?: string;
+    picture: string;
     emailVerified: boolean;
   }
   
@@ -13,6 +13,7 @@ export interface UserProfile {
     valid: boolean;
     userId?: string;
     error?: string;
+    roles?: string[];
   }
   
   export interface TokenOptions {
@@ -23,11 +24,10 @@ export interface UserProfile {
   
   export interface AuthResult {
     success: boolean;
-    user?: any;
-    token?: string;
-    refreshToken?: string | null;
-    expiresIn?: number;
-    error?: Error;
+    user: any;
+    token: string;
+    refreshToken?: string;
+    expiresIn: number;
   }
   
   export interface Session {
@@ -41,6 +41,7 @@ export interface UserProfile {
   export interface AuthService {
     // Authentication
     validateToken(token: string): Promise<TokenValidationResult>;
+    verifyToken(token: string): Promise<any>;
     generateToken(userId: string, options?: TokenOptions): Promise<string>;
     revokeToken(token: string): Promise<boolean>;
     
@@ -57,4 +58,7 @@ export interface UserProfile {
     // Permissions
     hasPermission(userId: string, resource: string, action: string): Promise<boolean>;
     getUserRoles(userId: string): Promise<string[]>;
+    validateCredentials(email: string, password: string): Promise<{ token: string; user: any }>;
+    handleAuth0Callback(auth0User: any): Promise<{ token: string; user: any }>;
+    refreshToken(token: string): Promise<{ token: string; user: any }>;
   }

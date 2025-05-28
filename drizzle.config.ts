@@ -11,7 +11,7 @@ export default {
     port: env.MYSQL_PORT,
     user: env.MYSQL_USER,
     password: env.MYSQL_PASSWORD,
-    database: env.MYSQL_DATABASE,
+    database: env.MYSQL_NAME,
   },
   verbose: true,
   strict: true,

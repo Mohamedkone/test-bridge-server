@@ -3,7 +3,7 @@ import { injectable, inject } from 'inversify';
 import { eq, and, SQL, sql } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
 import { DrizzleClient } from '../db/client';
-import { storageAccounts, storageCredentials } from '../db/schema';
+import { storageAccounts, storageCredentials, STORAGE_TYPES } from '../db/schema/storage';
 import { StorageAccountRepository, StorageAccount } from './storage-account.repository';
 import { Logger } from '../utils/logger';
 import { NotFoundError } from '../utils/errors';
@@ -13,6 +13,34 @@ import { StorageProviderType } from '../services/storage/types';
 
 interface DeleteResult {
     rowsAffected?: number;
+}
+
+type StorageType = typeof STORAGE_TYPES[number];
+
+// Map storage provider types to database storage types
+const STORAGE_TYPE_MAP: Partial<Record<StorageProviderType, StorageType>> = {
+  'vault': 'vault',
+  's3': 's3',
+  'google_drive': 'google_drive',
+  'dropbox': 'dropbox',
+  'azure_blob': 'azure_blob',
+  'gcp_storage': 'gcp_storage',
+  'cloud': 'vault' // Map cloud to vault
+};
+
+// Reverse mapping from database storage types to provider types
+const REVERSE_STORAGE_TYPE_MAP: Record<StorageType, StorageProviderType> = {
+  'vault': 'vault',
+  's3': 's3',
+  'gcp_storage': 'gcp_storage',
+  'azure_blob': 'azure_blob',
+  'dropbox': 'dropbox',
+  'google_drive': 'google_drive'
+};
+
+// Helper function to convert database storage type to provider type
+export function toProviderType(dbType: StorageType): StorageProviderType {
+  return REVERSE_STORAGE_TYPE_MAP[dbType];
 }
 
 @injectable()
@@ -38,7 +66,7 @@ export class StorageAccountRepositoryImpl implements StorageAccountRepository {
         id: results[0].id,
         name: results[0].name,
         companyId: results[0].companyId,
-        storageType: results[0].storageType as StorageProviderType,
+        storageType: toProviderType(results[0].storageType),
         isDefault: results[0].isDefault,
         createdAt: results[0].createdAt,
         updatedAt: results[0].updatedAt
@@ -60,7 +88,7 @@ export class StorageAccountRepositoryImpl implements StorageAccountRepository {
         id: result.id,
         name: result.name,
         companyId: result.companyId,
-        storageType: result.storageType as StorageProviderType,
+        storageType: toProviderType(result.storageType),
         isDefault: result.isDefault,
         createdAt: result.createdAt,
         updatedAt: result.updatedAt
@@ -90,7 +118,7 @@ export class StorageAccountRepositoryImpl implements StorageAccountRepository {
         id: results[0].id,
         name: results[0].name,
         companyId: results[0].companyId,
-        storageType: results[0].storageType as StorageProviderType,
+        storageType: toProviderType(results[0].storageType),
         isDefault: results[0].isDefault,
         createdAt: results[0].createdAt,
         updatedAt: results[0].updatedAt
@@ -103,20 +131,15 @@ export class StorageAccountRepositoryImpl implements StorageAccountRepository {
 
   async create(data: Omit<StorageAccount, 'id' | 'createdAt' | 'updatedAt'>): Promise<StorageAccount> {
     try {
+      const storageId = crypto.randomUUID();
       const now = new Date();
-      const storageId = uuidv4();
 
-      const newStorageAccount = {
-        id: storageId,
-        name: data.name,
-        companyId: data.companyId,
-        storageType: data.storageType,
-        isDefault: data.isDefault,
-        createdAt: now,
-        updatedAt: now
-      };
+      // Map the storage type to the database schema type
+      const dbStorageType = STORAGE_TYPE_MAP[data.storageType];
+      if (!dbStorageType) {
+        throw new Error(`Invalid storage type: ${data.storageType}`);
+      }
 
-      // If setting as default, unset any existing default
       if (data.isDefault) {
         await this.db.update(storageAccounts)
           .set({ isDefault: false })
@@ -132,11 +155,16 @@ export class StorageAccountRepositoryImpl implements StorageAccountRepository {
         id: storageId,
         name: data.name,
         companyId: data.companyId,
-        storageType: data.storageType,
+        storageType: dbStorageType,
         isDefault: data.isDefault,
         createdAt: now,
         updatedAt: now
       });
+      
+      const newStorageAccount = await this.findById(storageId);
+      if (!newStorageAccount) {
+        throw new Error('Failed to retrieve created storage account');
+      }
       
       this.logger.info('Storage account created', { 
         storageId: newStorageAccount.id,

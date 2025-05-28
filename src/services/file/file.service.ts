@@ -2,10 +2,12 @@
 import { injectable, inject } from 'inversify';
 import { v4 as uuidv4 } from 'uuid';
 import { Logger } from '../../utils/logger';
-import { FileRepository, FileEntity, FileVersionEntity, CreateFileParams } from '../../repositories/file.repository';
+import { FileRepository, FileEntity, FileVersionEntity, CreateFileParams, FILE_TYPES, ENCRYPTION_TYPES } from '../../repositories/file.repository';
 import { StorageService } from '../storage/storage.service';
-import { StorageProvider } from '../storage/types';
-import { NotFoundError, ValidationError } from '../../utils/errors';
+import { StorageProvider, SignedUrlOptions } from '../storage/types';
+import { NotFoundError, ValidationError, ForbiddenError, AccessDeniedError } from '../../utils/errors';
+import { WebSocketService } from '../websocket/websocket.service';
+import { RoomRepository } from '../../repositories/room.repository';
 
 export interface UploadFileParams {
   name: string;
@@ -17,7 +19,7 @@ export interface UploadFileParams {
   buffer?: Buffer;
   tempFilePath?: string;
   storageId?: string;
-  encryption?: 'none' | 'client_side' | 'server_side';
+  encryption?: typeof ENCRYPTION_TYPES[number];
   encryptionKey?: string;
   storageKey?: string; 
   metadata?: any;
@@ -36,7 +38,9 @@ export class FileService {
   constructor(
     @inject('FileRepository') private fileRepository: FileRepository,
     @inject('StorageService') private storageService: StorageService,
-    @inject('Logger') private logger: Logger
+    @inject('WebSocketService') private wsService: WebSocketService,
+    @inject('Logger') private logger: Logger,
+    @inject('RoomRepository') private roomRepository: RoomRepository
   ) {
     this.logger = logger.createChildLogger('FileService');
   }
@@ -337,51 +341,46 @@ export class FileService {
   }
 
   /**
-   * Get file download URL
+   * Get download URL for a file
    */
-  async getFileDownloadUrl(fileId: string, userId: string): Promise<FileOperationResult> {
+  async getDownloadUrl(fileId: string, userId: string): Promise<FileOperationResult> {
     try {
+      // Get file
       const file = await this.fileRepository.findById(fileId);
       
       if (!file) {
         throw new NotFoundError('File', fileId);
       }
       
-      if (file.isDeleted) {
-        throw new ValidationError('File has been deleted');
+      // Check permissions
+      if (file.uploadedById !== userId) {
+        throw new ForbiddenError('You do not have permission to download this file');
       }
       
-      if (file.fileType !== 'file') {
-        throw new ValidationError('Cannot download a folder');
-      }
-      
-      if (!file.storageKey) {
-        throw new ValidationError('File storage key is missing');
-      }
-      
-      // Get storage provider
+      // Get provider
       const provider = await this.storageService.getStorageProvider(file.storageId);
       
-      // Get signed URL
-      const urlResult = await provider.getSignedUrl(file.storageKey, {
+      // Get download URL
+      const urlResult = await provider.getSignedUrl(file.storageKey || '', {
         operation: 'read',
         expiresIn: 3600,
         contentType: file.mimeType || undefined,
-        contentDisposition: `attachment; filename="${encodeURIComponent(file.name)}"`
+        responseContentDisposition: `attachment; filename="${encodeURIComponent(file.name)}"`
       });
       
-      if (!urlResult.success || !urlResult.url) {
-        throw new Error('Failed to generate download URL');
+      if (!urlResult.success) {
+        throw new Error(urlResult.message || 'Failed to get download URL');
       }
       
-      // Log the action
-      await this.fileRepository.createLog({
+      // Notify download start
+      this.wsService.notifyFileTransferStatus(file.roomId, {
         fileId: file.id,
-        userId: userId,
-        action: 'download',
-        metadata: {
-          timestamp: new Date().toISOString()
-        }
+        type: 'download',
+        status: 'starting',
+        progress: 0,
+        bytesTransferred: 0,
+        totalBytes: file.size,
+        userId
       });
       
       return {
@@ -389,18 +388,125 @@ export class FileService {
         message: 'Download URL generated successfully',
         data: {
           url: urlResult.url,
-          filename: file.name,
-          contentType: file.mimeType,
-          size: file.size,
-          expiresIn: 3600
+          expiresAt: new Date(Date.now() + 3600000).toISOString()
         }
       };
     } catch (error: any) {
-      this.logger.error('Error generating download URL', { fileId, error });
+      this.logger.error('Error getting download URL', { fileId, error });
       
       return {
         success: false,
-        message: error.message || 'Failed to generate download URL',
+        message: error.message || 'Failed to get download URL',
+        error
+      };
+    }
+  }
+
+  /**
+   * Update download progress
+   */
+  async updateDownloadProgress(
+    fileId: string,
+    userId: string,
+    bytesDownloaded: number,
+    totalBytes: number,
+    speed: number
+  ): Promise<FileOperationResult> {
+    try {
+      // Get file
+      const file = await this.fileRepository.findById(fileId);
+      
+      if (!file) {
+        throw new NotFoundError('File', fileId);
+      }
+      
+      // Calculate progress
+      const progress = (bytesDownloaded / totalBytes) * 100;
+      
+      // Notify progress
+      this.wsService.notifyFileTransferStatus(file.roomId, {
+        fileId: file.id,
+        type: 'download',
+        status: 'in_progress',
+        progress,
+        bytesTransferred: bytesDownloaded,
+        totalBytes,
+        speed,
+        userId
+      });
+      
+      return {
+        success: true,
+        message: 'Download progress updated',
+        data: {
+          progress,
+          bytesDownloaded,
+          totalBytes,
+          speed
+        }
+      };
+    } catch (error: any) {
+      this.logger.error('Error updating download progress', { fileId, error });
+      
+      return {
+        success: false,
+        message: error.message || 'Failed to update download progress',
+        error
+      };
+    }
+  }
+
+  /**
+   * Complete download
+   */
+  async completeDownload(fileId: string, userId: string): Promise<FileOperationResult> {
+    try {
+      // Get file
+      const file = await this.fileRepository.findById(fileId);
+      
+      if (!file) {
+        throw new NotFoundError('File', fileId);
+      }
+      
+      // Notify completion
+      this.wsService.notifyFileTransferStatus(file.roomId, {
+        fileId: file.id,
+        type: 'download',
+        status: 'completed',
+        progress: 100,
+        bytesTransferred: file.size,
+        totalBytes: file.size,
+        userId
+      });
+      
+      return {
+        success: true,
+        message: 'Download completed successfully',
+        data: {
+          fileId: file.id,
+          fileName: file.name,
+          size: file.size
+        }
+      };
+    } catch (error: any) {
+      this.logger.error('Error completing download', { fileId, error });
+      
+      // Notify failure
+      const file = await this.fileRepository.findById(fileId);
+      if (file) {
+        this.wsService.notifyFileTransferStatus(file.roomId, {
+          fileId: file.id,
+          type: 'download',
+          status: 'error',
+          progress: 0,
+          error: error.message,
+          userId
+        });
+      }
+      
+      return {
+        success: false,
+        message: error.message || 'Failed to complete download',
         error
       };
     }
@@ -774,7 +880,7 @@ export class FileService {
         operation: 'read',
         expiresIn: 3600,
         contentType: file.mimeType || undefined,
-        contentDisposition: `attachment; filename="${encodeURIComponent(file.name)}"`
+        responseContentDisposition: `attachment; filename="${encodeURIComponent(file.name)}"`
       });
       
       if (!urlResult.success || !urlResult.url) {
@@ -859,6 +965,497 @@ export class FileService {
       return {
         success: false,
         message: error.message || 'Failed to delete file share',
+        error
+      };
+    }
+  }
+
+  /**
+   * Check if user has access to file
+   */
+  async checkAccess(fileId: string, userId: string, requiredLevel: 'read' | 'write' | 'admin'): Promise<boolean> {
+    try {
+      const file = await this.fileRepository.findByIdWithRelations(fileId, ['room', 'room.access']);
+      
+      if (!file) {
+        return false;
+      }
+
+      // Check if user is the uploader
+      if (file.uploadedById === userId) {
+        return true;
+      }
+
+      // Check room access
+      if (file.room) {
+        const userAccess = file.room.access.find((access: { userId: string }) => access.userId === userId);
+        if (!userAccess) {
+          return false;
+        }
+
+        const accessLevels = {
+          read: ['viewer', 'editor', 'owner'],
+          write: ['editor', 'owner'],
+          admin: ['owner']
+        };
+
+        return accessLevels[requiredLevel].includes(userAccess.accessType);
+      }
+
+      return false;
+    } catch (error: any) {
+      this.logger.error('Error checking file access', { fileId, userId, error });
+      throw error;
+    }
+  }
+
+  /**
+   * Get file metadata by ID
+   */
+  async getFile(fileId: string, userId: string): Promise<FileOperationResult> {
+    try {
+      const file = await this.fileRepository.findById(fileId);
+      
+      if (!file) {
+        throw new NotFoundError('File', fileId);
+      }
+      
+      // Check permissions
+      const hasAccess = await this.fileRepository.checkAccess(fileId, userId);
+      
+      if (!hasAccess) {
+        throw new AccessDeniedError('You do not have permission to access this file');
+      }
+      
+      return {
+        success: true,
+        data: file
+      };
+    } catch (error: any) {
+      this.logger.error('Error getting file', { fileId, error });
+      
+      return {
+        success: false,
+        message: error.message || 'Failed to get file',
+        error
+      };
+    }
+  }
+
+  /**
+   * Get file content with optional range support
+   */
+  async getFileContent(fileId: string, userId: string, range?: { start: number; end: number }): Promise<FileOperationResult> {
+    try {
+      const file = await this.fileRepository.findById(fileId);
+      
+      if (!file) {
+        throw new NotFoundError('File', fileId);
+      }
+      
+      // Check permissions
+      const hasAccess = await this.fileRepository.checkAccess(fileId, userId);
+      
+      if (!hasAccess) {
+        throw new AccessDeniedError('You do not have permission to access this file');
+      }
+      
+      if (file.fileType !== 'file' || !file.storageKey) {
+        throw new ValidationError('Requested item is not a file');
+      }
+      
+      // Get storage provider
+      const provider = await this.storageService.getStorageProvider(file.storageId);
+      
+      // Get file content with or without range
+      const result = await provider.getFileContent(file.storageKey, range);
+      
+      if (!result.success || !result.data) {
+        throw new Error(result.message || 'Failed to get file content');
+      }
+      
+      // Log access
+      await this.fileRepository.createLog({
+        fileId: file.id,
+        userId,
+        action: 'download',
+        metadata: {
+          timestamp: new Date().toISOString(),
+          range: range ? `${range.start}-${range.end}` : 'full'
+        }
+      });
+      
+      return {
+        success: true,
+        data: result.data
+      };
+    } catch (error: any) {
+      this.logger.error('Error getting file content', { fileId, error });
+      
+      return {
+        success: false,
+        message: error.message || 'Failed to get file content',
+        error
+      };
+    }
+  }
+
+  /**
+   * Search files with advanced filtering
+   */
+  async searchFiles(
+    roomId: string,
+    userId: string,
+    params: {
+      query?: string;
+      fileTypes?: string[];
+      mimeTypes?: string[];
+      minSize?: number;
+      maxSize?: number;
+      createdBefore?: Date;
+      createdAfter?: Date;
+      updatedBefore?: Date;
+      updatedAfter?: Date;
+      tags?: string[];
+      sort?: { field: string; direction: 'asc' | 'desc' };
+      page?: number;
+      limit?: number;
+    }
+  ): Promise<FileOperationResult> {
+    try {
+      // Check room access
+      const hasAccess = await this.roomRepository.checkUserAccess(roomId, userId);
+      
+      if (!hasAccess) {
+        throw new AccessDeniedError('You do not have permission to access files in this room');
+      }
+      
+      // Set pagination defaults
+      const page = params.page || 1;
+      const limit = params.limit || 50;
+      const offset = (page - 1) * limit;
+      
+      // Get files with filters
+      const files = await this.fileRepository.searchFiles(roomId, {
+        query: params.query,
+        fileTypes: params.fileTypes,
+        mimeTypes: params.mimeTypes,
+        minSize: params.minSize,
+        maxSize: params.maxSize,
+        createdBefore: params.createdBefore,
+        createdAfter: params.createdAfter,
+        updatedBefore: params.updatedBefore,
+        updatedAfter: params.updatedAfter,
+        tags: params.tags,
+        sort: params.sort,
+        limit,
+        offset
+      });
+      
+      // Get total count for pagination
+      const totalCount = await this.fileRepository.countSearchResults(roomId, {
+        query: params.query,
+        fileTypes: params.fileTypes,
+        mimeTypes: params.mimeTypes,
+        minSize: params.minSize,
+        maxSize: params.maxSize,
+        createdBefore: params.createdBefore,
+        createdAfter: params.createdAfter,
+        updatedBefore: params.updatedBefore,
+        updatedAfter: params.updatedAfter,
+        tags: params.tags
+      });
+      
+      return {
+        success: true,
+        data: {
+          files,
+          pagination: {
+            page,
+            limit,
+            totalCount,
+            totalPages: Math.ceil(totalCount / limit)
+          }
+        }
+      };
+    } catch (error: any) {
+      this.logger.error('Error searching files', { roomId, params, error });
+      
+      return {
+        success: false,
+        message: error.message || 'Failed to search files',
+        error
+      };
+    }
+  }
+
+  /**
+   * Move multiple files to a destination folder
+   */
+  async moveFiles(
+    fileIds: string[],
+    destinationFolderId: string,
+    userId: string
+  ): Promise<FileOperationResult> {
+    try {
+      if (!fileIds.length) {
+        throw new ValidationError('No files selected for moving');
+      }
+      
+      // Get destination folder info
+      const destinationFolder = await this.fileRepository.findById(destinationFolderId);
+      
+      if (!destinationFolder) {
+        throw new NotFoundError('Destination folder', destinationFolderId);
+      }
+      
+      if (destinationFolder.fileType !== 'folder') {
+        throw new ValidationError('Destination must be a folder');
+      }
+      
+      // Check user has access to destination folder
+      const hasAccess = await this.roomRepository.checkUserAccess(destinationFolder.roomId, userId);
+      
+      if (!hasAccess) {
+        throw new AccessDeniedError('You do not have permission to access this folder');
+      }
+      
+      // Process each file
+      const results = [];
+      let errors = 0;
+      
+      for (const fileId of fileIds) {
+        try {
+          // Get file info
+          const file = await this.fileRepository.findById(fileId);
+          
+          if (!file) {
+            results.push({ id: fileId, success: false, message: 'File not found' });
+            errors++;
+            continue;
+          }
+          
+          // Check if file is in same room as destination
+          if (file.roomId !== destinationFolder.roomId) {
+            results.push({ id: fileId, success: false, message: 'Cannot move files between rooms' });
+            errors++;
+            continue;
+          }
+          
+          // Update file's parent (remove updatedAt as it's handled automatically)
+          const updatedFile = await this.fileRepository.update(fileId, {
+            parentId: destinationFolderId
+          });
+          
+          // Log the action
+          await this.fileRepository.createLog({
+            fileId,
+            userId,
+            action: 'move',
+            metadata: {
+              destinationFolderId,
+              timestamp: new Date().toISOString()
+            }
+          });
+          
+          results.push({ id: fileId, success: true, data: updatedFile });
+        } catch (error: any) {
+          this.logger.error('Error moving file', { fileId, destinationFolderId, error });
+          results.push({ id: fileId, success: false, message: error.message });
+          errors++;
+        }
+      }
+      
+      return {
+        success: errors === 0,
+        message: errors === 0 
+          ? 'All files moved successfully' 
+          : `${fileIds.length - errors}/${fileIds.length} files moved successfully`,
+        data: results
+      };
+    } catch (error: any) {
+      this.logger.error('Error with bulk move operation', { fileIds, destinationFolderId, error });
+      
+      return {
+        success: false,
+        message: error.message || 'Failed to move files',
+        error
+      };
+    }
+  }
+
+  /**
+   * Delete multiple files
+   */
+  async deleteFiles(
+    fileIds: string[],
+    userId: string,
+    permanent: boolean = false
+  ): Promise<FileOperationResult> {
+    try {
+      if (!fileIds.length) {
+        throw new ValidationError('No files selected for deletion');
+      }
+      
+      // Process each file
+      const results = [];
+      let errors = 0;
+      
+      for (const fileId of fileIds) {
+        try {
+          // Delete the file
+          const result = await this.deleteFile(fileId, userId, permanent);
+          
+          if (!result.success) {
+            results.push({ id: fileId, success: false, message: result.message });
+            errors++;
+            continue;
+          }
+          
+          results.push({ id: fileId, success: true });
+        } catch (error: any) {
+          this.logger.error('Error deleting file', { fileId, permanent, error });
+          results.push({ id: fileId, success: false, message: error.message });
+          errors++;
+        }
+      }
+      
+      return {
+        success: errors === 0,
+        message: errors === 0 
+          ? `All files ${permanent ? 'permanently ' : ''}deleted successfully` 
+          : `${fileIds.length - errors}/${fileIds.length} files ${permanent ? 'permanently ' : ''}deleted`,
+        data: results
+      };
+    } catch (error: any) {
+      this.logger.error('Error with bulk delete operation', { fileIds, permanent, error });
+      
+      return {
+        success: false,
+        message: error.message || 'Failed to delete files',
+        error
+      };
+    }
+  }
+
+  /**
+   * Copy multiple files to a destination folder
+   */
+  async copyFiles(
+    fileIds: string[],
+    destinationFolderId: string,
+    userId: string
+  ): Promise<FileOperationResult> {
+    try {
+      if (!fileIds.length) {
+        throw new ValidationError('No files selected for copying');
+      }
+      
+      // Get destination folder info
+      const destinationFolder = await this.fileRepository.findById(destinationFolderId);
+      
+      if (!destinationFolder) {
+        throw new NotFoundError('Destination folder', destinationFolderId);
+      }
+      
+      if (destinationFolder.fileType !== 'folder') {
+        throw new ValidationError('Destination must be a folder');
+      }
+      
+      // Check user has access to destination folder
+      const hasAccess = await this.roomRepository.checkUserAccess(destinationFolder.roomId, userId);
+      
+      if (!hasAccess) {
+        throw new AccessDeniedError('You do not have permission to access this folder');
+      }
+      
+      // Process each file
+      const results = [];
+      let errors = 0;
+      
+      for (const fileId of fileIds) {
+        try {
+          // Get file info
+          const file = await this.fileRepository.findById(fileId);
+          
+          if (!file) {
+            results.push({ id: fileId, success: false, message: 'File not found' });
+            errors++;
+            continue;
+          }
+          
+          // Check if file is a file (not a folder)
+          if (file.fileType !== 'file') {
+            results.push({ id: fileId, success: false, message: 'Copying folders is not supported in bulk operations' });
+            errors++;
+            continue;
+          }
+          
+          // Check if file is in same room as destination
+          if (file.roomId !== destinationFolder.roomId) {
+            results.push({ id: fileId, success: false, message: 'Cannot copy files between rooms' });
+            errors++;
+            continue;
+          }
+          
+          // Create new file record with same storage key
+          const newFile = await this.fileRepository.create({
+            name: `Copy of ${file.name}`,
+            originalName: file.originalName,
+            mimeType: file.mimeType || undefined,
+            size: file.size,
+            fileType: 'file',
+            parentId: destinationFolderId,
+            storageId: file.storageId,
+            roomId: file.roomId,
+            uploadedById: userId,
+            storageKey: file.storageKey || undefined, // Convert null to undefined
+            encryption: file.encryption,
+            encryptionKeyId: file.encryptionKeyId || undefined, // Convert null to undefined
+            metadata: file.metadata ? JSON.parse(file.metadata) : undefined
+          });
+          
+          // Create initial version for the new file
+          await this.fileRepository.createVersion({
+            fileId: newFile.id,
+            size: file.size,
+            storageKey: file.storageKey || '', // Empty string as fallback
+            uploadedById: userId,
+            encryptionKeyId: file.encryptionKeyId || undefined
+          });
+          
+          // Log the action
+          await this.fileRepository.createLog({
+            fileId: newFile.id,
+            userId,
+            action: 'copy',
+            metadata: {
+              sourceFileId: fileId,
+              timestamp: new Date().toISOString()
+            }
+          });
+          
+          results.push({ id: fileId, success: true, data: newFile });
+        } catch (error: any) {
+          this.logger.error('Error copying file', { fileId, destinationFolderId, error });
+          results.push({ id: fileId, success: false, message: error.message });
+          errors++;
+        }
+      }
+      
+      return {
+        success: errors === 0,
+        message: errors === 0 
+          ? 'All files copied successfully' 
+          : `${fileIds.length - errors}/${fileIds.length} files copied successfully`,
+        data: results
+      };
+    } catch (error: any) {
+      this.logger.error('Error with bulk copy operation', { fileIds, destinationFolderId, error });
+      
+      return {
+        success: false,
+        message: error.message || 'Failed to copy files',
         error
       };
     }

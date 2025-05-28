@@ -115,3 +115,20 @@ export class AppError extends Error {
       super(message, 500, 'CONFIGURATION_ERROR', details, false);
     }
   }
+
+  export class ForbiddenError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'ForbiddenError';
+    }
+  }
+
+  /**
+   * Access Denied Error
+   */
+  export class AccessDeniedError extends Error {
+    constructor(message: string) {
+      super(message);
+      this.name = 'AccessDeniedError';
+    }
+  }

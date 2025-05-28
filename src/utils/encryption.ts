@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { env } from '../config/env';
 
 // The encryption key should be stored in environment variables
-const ENCRYPTION_KEY = env.ENCRYPTION_KEY || 'your-secret-encryption-key';
+const ENCRYPTION_KEY = process.env.ENCRYPTION_KEY || 'your-secret-encryption-key';
 const ALGORITHM = 'aes-256-gcm';
 
 /**

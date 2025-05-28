@@ -108,8 +108,8 @@ export class S3CompatibleStorageProvider extends BaseStorageProvider {
             Bucket: this.bucketName,
             Key: key,
             ContentType: options.contentType || 'application/octet-stream',
-            ContentDisposition: options.contentDisposition,
-            Metadata: options.metadata
+            ContentDisposition: options.responseContentDisposition,
+            Metadata: options.acl?.public ? { public: 'true' } : undefined
           });
           break;
         case 'delete':
@@ -240,7 +240,7 @@ export class S3CompatibleStorageProvider extends BaseStorageProvider {
             key: item.Key!,
             name: fileName,
             size: item.Size || 0,
-            lastModified: item.LastModified,
+            lastModified: item.LastModified || new Date(),
             etag: item.ETag?.replace(/"/g, ''), // Remove quotes from ETag
             isDirectory: false
           });
@@ -283,7 +283,7 @@ export class S3CompatibleStorageProvider extends BaseStorageProvider {
           key,
           name: this.getFileNameFromKey(key),
           size: response.ContentLength || 0,
-          lastModified: response.LastModified,
+          lastModified: response.LastModified || new Date(),
           contentType: response.ContentType,
           etag: response.ETag?.replace(/"/g, ''),
           metadata: response.Metadata,
@@ -603,11 +603,13 @@ export class S3CompatibleStorageProvider extends BaseStorageProvider {
       // Note: This approach is limited and will only work for buckets with relatively few objects
       
       const stats: StorageStats = {
-        totalBytes: 0, // Unknown total capacity
+        totalBytes: 0, // We don't know the total capacity
         usedBytes: totalSize,
         availableBytes: 0, // Unknown
         fileCount,
-        lastUpdated: new Date()
+        lastUpdated: new Date(),
+        usageByType: {}, // We would need to scan all objects to calculate this
+        costEstimate: (totalSize / (1024 * 1024 * 1024)) * 0.023 // S3-compatible storage cost ($0.023 per GB)
       };
       
       return {
@@ -643,5 +645,95 @@ export class S3CompatibleStorageProvider extends BaseStorageProvider {
       minimumPartSize: 5 * 1024 * 1024, // 5MB
       maximumPartCount: 10000
     };
+  }
+  
+  /**
+   * Get file content with optional range support
+   */
+  async getFileContent(key: string, range?: { start: number; end: number }): Promise<StorageOperationResult & { data?: Buffer }> {
+    try {
+      this.validateInitialized();
+      
+      const command = new GetObjectCommand({
+        Bucket: this.bucketName,
+        Key: key,
+        ...(range && { Range: `bytes=${range.start}-${range.end}` })
+      });
+      
+      try {
+        const response = await this.s3Client!.send(command);
+        
+        // Convert the readable stream to a buffer
+        const chunks: Buffer[] = [];
+        
+        // Use the ReadableStream from the response Body
+        const stream = response.Body as any;
+        
+        if (!stream) {
+          throw new Error('No response body received from S3');
+        }
+        
+        // If the stream is a Node.js readable stream
+        if (typeof stream.on === 'function') {
+          return new Promise((resolve, reject) => {
+            stream.on('data', (chunk: Buffer) => chunks.push(Buffer.from(chunk)));
+            stream.on('error', (err: Error) => reject(err));
+            stream.on('end', () => {
+              resolve({
+                success: true,
+                data: Buffer.concat(chunks)
+              });
+            });
+          });
+        } 
+        // If it's a Web API ReadableStream
+        else if (typeof stream.getReader === 'function') {
+          const reader = stream.getReader();
+          const chunks: Uint8Array[] = [];
+          
+          let result;
+          while (!(result = await reader.read()).done) {
+            chunks.push(result.value);
+          }
+          
+          return {
+            success: true,
+            data: Buffer.concat(chunks.map(chunk => Buffer.from(chunk)))
+          };
+        }
+        // If it's already a buffer or byte array
+        else if (stream instanceof Uint8Array || Buffer.isBuffer(stream)) {
+          return {
+            success: true,
+            data: Buffer.from(stream)
+          };
+        }
+        // Last fallback - try to convert to buffer directly
+        else {
+          this.logger.warn('Unexpected response body type, attempting conversion', { 
+            type: typeof stream, 
+            isBuffer: Buffer.isBuffer(stream)
+          });
+          
+          return {
+            success: true,
+            data: Buffer.from(stream)
+          };
+        }
+      } catch (error: any) {
+        if (error.name === 'NoSuchKey') {
+          throw new StorageNotFoundError('S3-compatible', key);
+        }
+        throw error;
+      }
+    } catch (error: any) {
+      this.logger.error('Failed to get file content', { key, range, error });
+      
+      if (error instanceof StorageNotFoundError) {
+        throw error;
+      }
+      
+      throw new StorageProviderError('S3-compatible', 'getFileContent', error);
+    }
   }
 }

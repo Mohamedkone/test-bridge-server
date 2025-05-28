@@ -1,37 +1,80 @@
 // src/api/routes/storage.routes.ts
 import { Router } from 'express';
-import { container } from '../../config/container';
+import { injectable, inject } from 'inversify';
 import { StorageController } from '../controllers/storage.controller';
 import { AuthMiddleware } from '../middleware/auth.middleware';
+import { validate } from '../middleware/validation.middleware';
+import multer from 'multer';
+import { Request, Response, NextFunction } from 'express';
 
-const storageController = container.get<StorageController>(StorageController);
-const authMiddleware = container.get<AuthMiddleware>(AuthMiddleware);
+// Configure multer for memory storage (files as buffers)
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: {
+    fileSize: 100 * 1024 * 1024, // 100MB limit
+  }
+});
 
-const router = Router();
+@injectable()
+export class StorageRoutes {
+  private router: Router;
 
-// Public routes
-router.get('/providers', storageController.getProviders.bind(storageController));
+  constructor(
+    @inject('StorageController') private storageController: StorageController,
+    @inject('AuthMiddleware') private authMiddleware: AuthMiddleware
+  ) {
+    this.router = Router();
+    this.setupRoutes();
+  }
 
+  private setupRoutes(): void {
+    // Helper function to wrap controller methods as express handlers
+    const wrap = (fn: Function) => (req: Request, res: Response, next: NextFunction) => {
+      fn.call(this.storageController, req, res, next)
+        .catch(next);
+    };
 
-// Protected routes - require authentication
-router.use(authMiddleware.authenticate);
+    // Get available storage providers
+    this.router.get('/providers', wrap(this.storageController.getProviderTypes));
 
-// Storage account management
-router.get('/company/:companyId', storageController.getCompanyStorageAccounts.bind(storageController));
-router.get('/:id', storageController.getStorageAccount.bind(storageController));
-router.post('/', storageController.createStorageAccount.bind(storageController));
-router.patch('/:id', storageController.updateStorageAccount.bind(storageController));
-router.delete('/:id', storageController.deleteStorageAccount.bind(storageController));
+    // Get storage accounts for a company
+    this.router.get('/company/:companyId', wrap(this.storageController.getStorageAccounts));
 
-// Default storage management
-router.post('/:id/default/:companyId', storageController.setDefaultStorageAccount.bind(storageController));
+    // Get a specific storage account
+    this.router.get('/:id', wrap(this.storageController.getStorageAccount));
 
-// Credentials management
-router.patch('/:id/credentials', storageController.updateCredentials.bind(storageController));
-router.post('/validate-credentials', storageController.validateCredentials.bind(storageController));
+    // Protected routes - require authentication
+    this.router.use(this.authMiddleware.verifyToken.bind(this.authMiddleware));
 
-// Storage operations
-router.post('/:id/test', storageController.testConnection.bind(storageController));
-router.get('/:id/usage', storageController.getStorageUsage.bind(storageController));
+    // Create a new storage account
+    this.router.post('/', wrap(this.storageController.createStorageAccount));
 
-export default router;
+    // Update a storage account
+    this.router.put('/:id', wrap(this.storageController.updateStorageAccount));
+
+    // Delete a storage account
+    this.router.delete('/:id', wrap(this.storageController.deleteStorageAccount));
+
+    // Update storage account credentials
+    this.router.put('/:id/credentials', wrap(this.storageController.updateCredentials));
+
+    // Set default storage account for a company
+    this.router.put('/:id/default/:companyId', wrap(this.storageController.setDefaultStorageAccount));
+
+    // Test storage account connection
+    this.router.post('/:id/test', wrap(this.storageController.testConnection));
+
+    // Get storage account stats
+    this.router.get('/:id/stats', wrap(this.storageController.getStorageStats));
+
+    // Get all storage accounts with usage information
+    this.router.get('/usage/company', wrap(this.storageController.getAllStorageAccountsWithUsage));
+
+    // Upload file with progress tracking
+    this.router.post('/:id/upload', upload.single('file'), wrap(this.storageController.uploadWithProgress));
+  }
+
+  public getRouter(): Router {
+    return this.router;
+  }
+}

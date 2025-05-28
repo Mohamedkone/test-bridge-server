@@ -1,650 +1,678 @@
 // src/services/storage/providers/dropbox-provider.ts
+import { Dropbox } from 'dropbox';
 import { injectable, inject } from 'inversify';
 import { BaseStorageProvider } from '../base-provider';
 import { Logger } from '../../../utils/logger';
-import { StorageOperationResult, SignedUrlOptions, FolderOptions, ListOptions, DeleteOptions, UploadOptions, FileMetadata, StorageStats } from '../types';
+import { StorageOperationResult, SignedUrlOptions, FolderOptions, ListOptions, DeleteOptions, UploadOptions, FileMetadata, StorageStats, ProgressCallback } from '../types';
 import { DropboxCredentials } from '../credentials';
 import { StorageAuthError, StorageNotFoundError, StorageAccessError, StorageProviderError } from '../errors';
-import axios from 'axios';
+import { Readable } from 'stream';
+import crypto from 'crypto';
+import { EventEmitter } from 'events';
 
 @injectable()
 export class DropboxStorageProvider extends BaseStorageProvider {
-  private accessToken?: string;
-  private refreshToken?: string;
-  private appKey?: string;
-  private appSecret?: string;
-
+  private dropbox?: Dropbox;
+  private cursorsByPath: Map<string, string> = new Map();
+  private webhookSecret?: string;
+  private changeEmitter: EventEmitter = new EventEmitter();
+  
   constructor(@inject('Logger') logger: Logger) {
     super(logger, 'dropbox');
   }
 
-  /**
-   * Initialize the Dropbox storage provider with credentials
-   * @param credentials Dropbox credentials
-   */
   async initialize(credentials: DropboxCredentials): Promise<StorageOperationResult> {
     try {
-      this.logger.info('Initializing Dropbox storage provider');
-      
-      this.accessToken = credentials.accessToken;
-      this.refreshToken = credentials.refreshToken;
-      this.appKey = credentials.appKey;
-      this.appSecret = credentials.appSecret;
-      
-      // If refresh token is provided, try to refresh access token
-      if (this.refreshToken && this.appKey && this.appSecret) {
-        const refreshResult = await this.refreshAccessToken();
-        if (!refreshResult.success) {
-          return refreshResult;
-        }
-      }
-      
+      this.dropbox = new Dropbox({
+        accessToken: credentials.accessToken,
+        clientId: credentials.appKey,
+        clientSecret: credentials.appSecret
+      });
+
       // Test the connection
-      const testResult = await this.testConnection();
-      if (!testResult.success) {
-        return testResult;
-      }
-      
+      await this.dropbox.checkUser({});
       this.initialized = true;
-      this.credentials = credentials;
-      
-      this.logger.info('Dropbox storage provider initialized');
-      return {
-        success: true,
-        message: 'Dropbox storage provider initialized successfully'
-      };
+
+      return { success: true };
     } catch (error: any) {
-      this.logger.error('Failed to initialize Dropbox storage provider', { error });
-      return {
-        success: false,
-        message: 'Failed to initialize Dropbox storage provider',
-        error: new StorageAuthError('Dropbox', error)
-      };
+      this.logger.error('Failed to initialize Dropbox provider', { error });
+      throw new StorageAuthError('dropbox', error);
     }
   }
 
-  /**
-   * Refresh the access token using refresh token
-   */
-  private async refreshAccessToken(): Promise<StorageOperationResult> {
-    try {
-      const params = new URLSearchParams();
-      params.append('grant_type', 'refresh_token');
-      params.append('refresh_token', this.refreshToken!);
-      params.append('client_id', this.appKey!);
-      params.append('client_secret', this.appSecret!);
-      
-      const response = await axios.post('https://api.dropboxapi.com/oauth2/token', params);
-      
-      this.accessToken = response.data.access_token;
-      
-      return {
-        success: true,
-        message: 'Access token refreshed successfully'
-      };
-    } catch (error: any) {
-      this.logger.error('Failed to refresh access token', { error });
-      return {
-        success: false,
-        message: 'Failed to refresh access token',
-        error: new StorageAuthError('Dropbox', error)
-      };
-    }
-  }
-
-  /**
-   * Test the connection to Dropbox
-   */
   async testConnection(): Promise<StorageOperationResult> {
     try {
-      // Try to get current account info to verify connection
-      await axios.post('https://api.dropboxapi.com/2/users/get_current_account', null, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
-      return {
-        success: true,
-        message: 'Connection to Dropbox successful'
-      };
+      this.validateInitialized();
+      await this.dropbox!.checkUser({});
+      return { success: true };
     } catch (error: any) {
-      // If token expired, try to refresh
-      if (error.response && error.response.status === 401 && this.refreshToken) {
-        const refreshResult = await this.refreshAccessToken();
-        if (refreshResult.success) {
-          // Retry the test
-          return this.testConnection();
-        }
-      }
-      
-      this.logger.error('Failed to connect to Dropbox', { error });
-      return {
-        success: false,
-        message: 'Failed to connect to Dropbox',
-        error: new StorageAuthError('Dropbox', error)
-      };
+      this.logger.error('Failed to test Dropbox connection', { error });
+      return { success: false, message: error.message };
     }
   }
 
-  /**
-   * Generate a signed URL for direct client operations
-   */
   async getSignedUrl(key: string, options: SignedUrlOptions): Promise<StorageOperationResult & { url?: string }> {
     try {
       this.validateInitialized();
       
-      // Dropbox path should start with /
-      const dropboxPath = this.toDropboxPath(key);
-      
-      // For read operations, generate a temporary link
-      if (options.operation === 'read') {
-        const response = await axios.post('https://api.dropboxapi.com/2/files/get_temporary_link', {
-          path: dropboxPath
-        }, {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/json'
-          }
-        });
-        
-        return {
-          success: true,
-          url: response.data.link,
-          message: 'Temporary link generated successfully'
-        };
-      } 
-      // For write operations, we'll need to use the upload API
-      else if (options.operation === 'write') {
-        // Dropbox doesn't support direct upload URLs, so we'll return an error
-        return {
-          success: false,
-          message: 'Direct upload via signed URL not supported for Dropbox',
-          error: new StorageProviderError('Dropbox', 'getSignedUrl')
-        };
-      }
+      const response = await this.dropbox!.filesGetTemporaryLink({ path: key });
       
       return {
-        success: false,
-        message: `Unsupported operation: ${options.operation}`,
-        error: new StorageProviderError('Dropbox', 'getSignedUrl')
+        success: true,
+        url: response.result.link
       };
     } catch (error: any) {
-      this.logger.error('Failed to generate signed URL', { key, error });
-      
-      // Handle file not found error
-      if (error.response && error.response.status === 409 && 
-          error.response.data?.error?.['.tag'] === 'path' && 
-          error.response.data?.error?.path?.['.tag'] === 'not_found') {
-        return {
-          success: false,
-          message: `File not found: ${key}`,
-          error: new StorageNotFoundError(key)
-        };
-      }
-      
-      return {
-        success: false,
-        message: 'Failed to generate signed URL',
-        error: new StorageProviderError('Dropbox', 'getSignedUrl', error)
-      };
+      this.logger.error('Failed to get signed URL', { key, error });
+      throw new StorageProviderError('dropbox', 'getSignedUrl', error);
     }
   }
 
-  /**
-   * Create a folder in Dropbox
-   */
   async createFolder(path: string, folderName: string, options?: FolderOptions): Promise<StorageOperationResult> {
     try {
       this.validateInitialized();
       
-      // Construct the full path
-      const fullPath = path ? `${path}/${folderName}` : folderName;
-      const dropboxPath = this.toDropboxPath(fullPath);
+      const folderPath = `${path}/${folderName}`.replace(/^\/+/, '/');
       
-      // Create folder
-      await axios.post('https://api.dropboxapi.com/2/files/create_folder_v2', {
-        path: dropboxPath,
-        autorename: false
-      }, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
+      await this.dropbox!.filesCreateFolderV2({ path: folderPath });
+
       return {
         success: true,
         message: 'Folder created successfully',
         data: {
-          path: fullPath,
-          name: folderName
+          key: folderPath,
+          name: folderName,
+          type: 'folder'
         }
       };
     } catch (error: any) {
       this.logger.error('Failed to create folder', { path, folderName, error });
-      
-      // Handle conflict (already exists)
-      if (error.response && error.response.status === 409 && 
-          error.response.data?.error?.['.tag'] === 'path' && 
-          error.response.data?.error?.path?.['.tag'] === 'conflict') {
-        return {
-          success: false,
-          message: `Folder already exists: ${folderName}`,
-          error
-        };
-      }
-      
-      return {
-        success: false,
-        message: 'Failed to create folder',
-        error: new StorageProviderError('Dropbox', 'createFolder', error)
-      };
+      throw new StorageProviderError('dropbox', 'createFolder', error);
     }
   }
 
-  /**
-   * List files in a Dropbox directory
-   */
   async listFiles(path: string, options?: ListOptions): Promise<StorageOperationResult & { files?: FileMetadata[] }> {
     try {
       this.validateInitialized();
       
-      const dropboxPath = this.toDropboxPath(path);
-      
-      // List files
-      const response = await axios.post('https://api.dropboxapi.com/2/files/list_folder', {
-        path: dropboxPath,
-        recursive: options?.recursive || false,
-        include_media_info: false,
-        include_deleted: false,
-        include_has_explicit_shared_members: false,
-        limit: options?.maxResults || 1000
-      }, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        }
+      const response = await this.dropbox!.filesListFolder({
+        path: path || '',
+        limit: options?.maxResults || 100,
+        include_media_info: true,
+        include_deleted: false
       });
-      
-      // Map to FileMetadata
-      const files: FileMetadata[] = response.data.entries.map((entry: any) => ({
-        key: this.fromDropboxPath(entry.path_display),
-        name: entry.name,
-        size: entry['.tag'] === 'file' ? entry.size : 0,
-        lastModified: entry['.tag'] === 'file' ? new Date(entry.server_modified) : new Date(),
-        contentType: entry['.tag'] === 'file' ? this.determineContentType(entry.name) : 'folder',
-        isDirectory: entry['.tag'] === 'folder',
-        etag: entry.rev,
-        metadata: {
-          dropboxId: entry.id,
-          rev: entry.rev
-        }
-      }));
-      
-      // Handle pagination with cursor
-      const data: Record<string, any> = {};
-      if (response.data.has_more) {
-        data.cursor = response.data.cursor;
-      }
-      
+
+      const files = response.result.entries.map(entry => {
+        const isFile = entry['.tag'] === 'file';
+        const isFolder = entry['.tag'] === 'folder';
+        const isDeleted = entry['.tag'] === 'deleted';
+        
+        return {
+          key: entry.path_display!,
+          name: entry.name,
+          size: isFile ? (entry as any).size || 0 : 0,
+          lastModified: isFile ? new Date((entry as any).server_modified) : new Date(),
+          contentType: isFile ? (entry as any).content_type || undefined : 'folder',
+          isDirectory: isFolder,
+          metadata: {
+            id: isDeleted ? undefined : entry.id,
+            pathLower: entry.path_lower,
+            rev: isFile ? (entry as any).rev : undefined
+          }
+        };
+      });
+
       return {
         success: true,
         files,
-        data
+        data: {
+          hasMore: response.result.has_more,
+          cursor: response.result.cursor
+        }
       };
     } catch (error: any) {
       this.logger.error('Failed to list files', { path, error });
-      
-      // Handle not found error
-      if (error.response && error.response.status === 409 && 
-          error.response.data?.error?.['.tag'] === 'path' && 
-          error.response.data?.error?.path?.['.tag'] === 'not_found') {
-        return {
-          success: false,
-          message: `Path not found: ${path}`,
-          error: new StorageNotFoundError(path)
-        };
-      }
-      
-      return {
-        success: false,
-        message: 'Failed to list files',
-        error: new StorageProviderError('Dropbox', 'listFiles', error)
-      };
+      throw new StorageProviderError('dropbox', 'listFiles', error);
     }
   }
 
-  /**
-   * Get file metadata from Dropbox
-   */
   async getFileMetadata(key: string): Promise<StorageOperationResult & { metadata?: FileMetadata }> {
     try {
       this.validateInitialized();
       
-      const dropboxPath = this.toDropboxPath(key);
-      
-      // Get metadata
-      const response = await axios.post('https://api.dropboxapi.com/2/files/get_metadata', {
-        path: dropboxPath,
-        include_media_info: false,
-        include_deleted: false,
-        include_has_explicit_shared_members: false
-      }, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        }
+      const response = await this.dropbox!.filesGetMetadata({
+        path: key,
+        include_media_info: true
       });
-      
-      const entry = response.data;
-      
-      // Map to FileMetadata
-      const metadata: FileMetadata = {
-        key: this.fromDropboxPath(entry.path_display),
-        name: entry.name,
-        size: entry['.tag'] === 'file' ? entry.size : 0,
-        lastModified: entry['.tag'] === 'file' ? new Date(entry.server_modified) : new Date(),
-        contentType: entry['.tag'] === 'file' ? this.determineContentType(entry.name) : 'folder',
-        isDirectory: entry['.tag'] === 'folder',
-        etag: entry.rev,
-        metadata: {
-          dropboxId: entry.id,
-          rev: entry.rev
-        }
-      };
+
+      const entry = response.result;
+      const isFile = entry['.tag'] === 'file';
+      const isFolder = entry['.tag'] === 'folder';
+      const isDeleted = entry['.tag'] === 'deleted';
       
       return {
         success: true,
-        metadata
+        metadata: {
+          key: entry.path_display!,
+          name: entry.name,
+          size: isFile ? (entry as any).size || 0 : 0,
+          lastModified: isFile ? new Date((entry as any).server_modified) : new Date(),
+          contentType: isFile ? (entry as any).content_type || undefined : 'folder',
+          isDirectory: isFolder,
+          metadata: {
+            id: isDeleted ? undefined : entry.id,
+            pathLower: entry.path_lower,
+            rev: isFile ? (entry as any).rev : undefined
+          }
+        }
       };
     } catch (error: any) {
       this.logger.error('Failed to get file metadata', { key, error });
-      
-      // Handle not found error
-      if (error.response && error.response.status === 409 && 
-          error.response.data?.error?.['.tag'] === 'path' && 
-          error.response.data?.error?.path?.['.tag'] === 'not_found') {
-        return {
-          success: false,
-          message: `File not found: ${key}`,
-          error: new StorageNotFoundError(key)
-        };
-      }
-      
-      return {
-        success: false,
-        message: 'Failed to get file metadata',
-        error: new StorageProviderError('Dropbox', 'getFileMetadata', error)
-      };
+      throw new StorageProviderError('dropbox', 'getFileMetadata', error);
     }
   }
 
-  /**
-   * Delete a file or folder from Dropbox
-   */
   async deleteFile(key: string, options?: DeleteOptions): Promise<StorageOperationResult> {
     try {
       this.validateInitialized();
       
-      const dropboxPath = this.toDropboxPath(key);
-      
-      // Delete file or folder
-      await axios.post('https://api.dropboxapi.com/2/files/delete_v2', {
-        path: dropboxPath
-      }, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      });
-      
+      await this.dropbox!.filesDeleteV2({ path: key });
+
       return {
         success: true,
         message: 'File deleted successfully'
       };
     } catch (error: any) {
       this.logger.error('Failed to delete file', { key, error });
-      
-      // Handle not found error
-      if (error.response && error.response.status === 409 && 
-          error.response.data?.error?.['.tag'] === 'path' && 
-          error.response.data?.error?.path?.['.tag'] === 'not_found') {
-        return {
-          success: false,
-          message: `File not found: ${key}`,
-          error: new StorageNotFoundError(key)
-        };
-      }
-      
-      return {
-        success: false,
-        message: 'Failed to delete file',
-        error: new StorageProviderError('Dropbox', 'deleteFile', error)
-      };
+      throw new StorageProviderError('dropbox', 'deleteFile', error);
     }
   }
 
-  /**
-   * Check if a file exists in Dropbox
-   */
   async fileExists(key: string): Promise<StorageOperationResult & { exists?: boolean }> {
     try {
       this.validateInitialized();
       
-      const result = await this.getFileMetadata(key);
-      
+      await this.dropbox!.filesGetMetadata({ path: key });
+
       return {
         success: true,
-        exists: result.success
+        exists: true
       };
     } catch (error: any) {
-      this.logger.error('Failed to check if file exists', { key, error });
-      return {
-        success: false,
-        message: 'Failed to check if file exists',
-        error: new StorageProviderError('Dropbox', 'fileExists', error)
-      };
+      if (error.status === 409) { // Path not found
+        return {
+          success: true,
+          exists: false
+        };
+      }
+      throw new StorageProviderError('dropbox', 'fileExists', error);
     }
   }
 
-  /**
-   * Dropbox uses a session-based upload approach for large files
-   */
   async createMultipartUpload(key: string, options?: UploadOptions): Promise<StorageOperationResult & { uploadId?: string }> {
     try {
       this.validateInitialized();
       
-      const dropboxPath = this.toDropboxPath(key);
-      
-      // Start a session for upload
-      const response = await axios.post('https://content.dropboxapi.com/2/files/upload_session/start', 
-        Buffer.from(''), // Empty buffer to start session
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/octet-stream'
-          }
-        }
-      );
-      
-      if (!response.data.session_id) {
-        throw new Error('Failed to get upload session ID');
-      }
-      
-      // Store session ID and path for later
+      const response = await this.dropbox!.filesUploadSessionStart({
+        contents: Buffer.alloc(0),
+        close: false
+      });
+
       return {
         success: true,
-        uploadId: JSON.stringify({
-          sessionId: response.data.session_id,
-          path: dropboxPath
-        }),
-        message: 'Upload session created successfully'
+        uploadId: response.result.session_id
       };
     } catch (error: any) {
-      this.logger.error('Failed to create upload session', { key, error });
-      return {
-        success: false,
-        message: 'Failed to create upload session',
-        error: new StorageProviderError('Dropbox', 'createMultipartUpload', error)
-      };
+      this.logger.error('Failed to create multipart upload', { key, error });
+      throw new StorageProviderError('dropbox', 'createMultipartUpload', error);
     }
   }
 
   async getSignedUrlForPart(key: string, uploadId: string, partNumber: number, contentLength: number): Promise<StorageOperationResult & { url?: string }> {
-    // Dropbox doesn't support pre-signed URLs for uploads
-    // Instead, clients need to upload directly to the API
-    return {
-      success: false,
-      message: 'Direct upload via signed URL not supported for Dropbox',
-      error: new StorageProviderError('Dropbox', 'getSignedUrlForPart')
-    };
+    try {
+      this.validateInitialized();
+      
+      const response = await this.dropbox!.filesUploadSessionAppendV2({
+        cursor: {
+          session_id: uploadId,
+          offset: (partNumber - 1) * contentLength
+        },
+        contents: Buffer.alloc(0),
+        close: false
+      });
+
+      return {
+        success: true,
+        url: uploadId // Use the uploadId as the URL since Dropbox doesn't provide a direct URL
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to get signed URL for part', { key, uploadId, partNumber, error });
+      throw new StorageProviderError('dropbox', 'getSignedUrlForPart', error);
+    }
   }
 
   async completeMultipartUpload(key: string, uploadId: string, parts: any[]): Promise<StorageOperationResult> {
     try {
       this.validateInitialized();
       
-      // Parse the upload ID to get session ID and path
-      const { sessionId, path } = JSON.parse(uploadId);
-      
-      // Calculate total size from parts
-      const totalSize = parts.reduce((sum, part) => sum + part.size, 0);
-      
-      // Complete the session
-      await axios.post('https://content.dropboxapi.com/2/files/upload_session/finish', 
-        Buffer.from(''), // Empty buffer since we're just completing
-        {
-          headers: {
-            'Authorization': `Bearer ${this.accessToken}`,
-            'Content-Type': 'application/octet-stream',
-            'Dropbox-API-Arg': JSON.stringify({
-              cursor: {
-                session_id: sessionId,
-                offset: totalSize
-              },
-              commit: {
-                path,
-                mode: 'overwrite',
-                autorename: false,
-                mute: false
-              }
-            })
-          }
-        }
-      );
-      
+      const commit = {
+        path: key,
+        mode: { '.tag': 'overwrite' } as any,
+        autorename: false,
+        mute: false
+      };
+
+      await this.dropbox!.filesUploadSessionFinish({
+        cursor: {
+          session_id: uploadId,
+          offset: parts.reduce((sum, part) => sum + part.size, 0)
+        },
+        commit
+      });
+
       return {
         success: true,
-        message: 'Upload completed successfully'
+        message: 'Multipart upload completed successfully'
       };
     } catch (error: any) {
-      this.logger.error('Failed to complete upload', { key, error });
-      return {
-        success: false,
-        message: 'Failed to complete upload',
-        error: new StorageProviderError('Dropbox', 'completeMultipartUpload', error)
-      };
+      this.logger.error('Failed to complete multipart upload', { key, uploadId, error });
+      throw new StorageProviderError('dropbox', 'completeMultipartUpload', error);
     }
   }
 
   async abortMultipartUpload(key: string, uploadId: string): Promise<StorageOperationResult> {
-    // Dropbox doesn't have an explicit way to abort a session
-    // Sessions automatically expire if not used
-    return {
-      success: true,
-      message: 'Upload session will expire automatically'
-    };
+    try {
+      this.validateInitialized();
+      
+      // Dropbox doesn't have a direct abort method, so we'll just close the session
+      await this.dropbox!.filesUploadSessionFinish({
+        cursor: {
+          session_id: uploadId,
+          offset: 0
+        },
+        commit: {
+          path: key,
+          mode: { '.tag': 'overwrite' } as any,
+          autorename: false,
+          mute: false
+        }
+      });
+
+      return {
+        success: true,
+        message: 'Multipart upload aborted successfully'
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to abort multipart upload', { key, uploadId, error });
+      throw new StorageProviderError('dropbox', 'abortMultipartUpload', error);
+    }
   }
 
-  /**
-   * Get storage usage statistics for Dropbox
-   */
   async getStorageStats(): Promise<StorageOperationResult & { stats?: StorageStats }> {
     try {
       this.validateInitialized();
       
-      // Get space usage
-      const response = await axios.post('https://api.dropboxapi.com/2/users/get_space_usage', null, {
-        headers: {
-          'Authorization': `Bearer ${this.accessToken}`,
-          'Content-Type': 'application/json'
-        }
-      });
+      const response = await this.dropbox!.usersGetSpaceUsage();
+      const usage = response.result;
       
-      const usage = response.data;
-      
-      // Get approximate file count
-      const filesCountResp = await this.listFiles('', { maxResults: 1000 });
-      let fileCount = filesCountResp.success && filesCountResp.files ? filesCountResp.files.length : 0;
-      
-      // If there are more than 1000 files, we can't get an exact count easily
-      const hasMore = filesCountResp.data?.cursor ? true : false;
-      if (hasMore) {
-        fileCount = 1000; // This is an approximation
+      // Calculate total space based on allocation type
+      let totalBytes = 0;
+      if (usage.allocation['.tag'] === 'individual') {
+        totalBytes = usage.allocation.allocated;
+      } else if (usage.allocation['.tag'] === 'team') {
+        totalBytes = usage.allocation.allocated;
       }
       
-      const stats: StorageStats = {
-        totalBytes: usage.allocation.allocated,
-        usedBytes: usage.used,
-        availableBytes: usage.allocation.allocated - usage.used,
-        fileCount,
-        lastUpdated: new Date()
-      };
+      const usedBytes = usage.used;
+      const availableBytes = totalBytes - usedBytes;
       
       return {
         success: true,
-        stats,
-        message: 'Storage statistics retrieved successfully'
+        stats: {
+          totalBytes,
+          usedBytes,
+          availableBytes,
+          fileCount: 0, // Dropbox API doesn't provide this directly
+          lastUpdated: new Date(),
+          usageByType: {
+            'folder': 0,
+            'document': 0,
+            'image': 0,
+            'video': 0,
+            'audio': 0,
+            'other': usedBytes
+          },
+          costEstimate: 0 // Dropbox has a free tier with 2GB storage
+        }
       };
     } catch (error: any) {
-      this.logger.error('Failed to get storage statistics', { error });
+      this.logger.error('Failed to get storage stats', { error });
+      throw new StorageProviderError('dropbox', 'getStorageStats', error);
+    }
+  }
+
+  async getFileContent(key: string, range?: { start: number; end: number }): Promise<StorageOperationResult & { data?: Buffer }> {
+    try {
+      this.validateInitialized();
+      
+      let fileData;
+      
+      if (range) {
+        // For range requests, need to handle this differently
+        // First download the file and then slice the buffer
+        fileData = await this.dropbox!.filesDownload({
+          path: key
+        });
+        
+        // Extract file content
+        const fileContent = (fileData.result as any).fileBinary;
+        
+        // Convert to Buffer if not already
+        const fullBuffer = Buffer.isBuffer(fileContent) 
+          ? fileContent 
+          : Buffer.from(fileContent);
+        
+        // Slice the buffer according to the range
+        const rangeBuffer = fullBuffer.slice(range.start, range.end + 1);
+        
+        return {
+          success: true,
+          data: rangeBuffer
+        };
+      } else {
+        // Download full file
+        fileData = await this.dropbox!.filesDownload({
+          path: key
+        });
+        
+        // Extract file content
+        const fileContent = (fileData.result as any).fileBinary;
+        
+        // Convert to Buffer if not already
+        const buffer = Buffer.isBuffer(fileContent) 
+          ? fileContent 
+          : Buffer.from(fileContent);
+        
+        return {
+          success: true,
+          data: buffer
+        };
+      }
+    } catch (error: any) {
+      this.logger.error('Failed to get file content', { key, range, error });
+      
+      if (error.status === 409 && error.error && error.error['.tag'] === 'path' && error.error.path['.tag'] === 'not_found') {
+        throw new StorageNotFoundError('dropbox', key);
+      }
+      
+      throw new StorageProviderError('dropbox', 'getFileContent', error);
+    }
+  }
+
+  /**
+   * Register a webhook to receive file change notifications
+   */
+  async registerWebhook(callbackUrl: string, secret: string): Promise<StorageOperationResult> {
+    try {
+      this.validateInitialized();
+      
+      // Store webhook secret for verification
+      this.webhookSecret = secret;
+      
+      // Register the webhook with Dropbox
+      const response = await this.dropbox!.filesListFolderGetLatestCursor({
+        path: '',
+        recursive: true,
+        include_media_info: true,
+        include_deleted: true
+      });
+      
+      // Store the cursor
+      const cursor = response.result.cursor;
+      this.cursorsByPath.set('/', cursor);
+      
+      this.logger.info('Registered Dropbox webhook', { callbackUrl });
+      
+      return {
+        success: true,
+        message: 'Dropbox webhook registered successfully',
+        data: {
+          cursor
+        }
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to register Dropbox webhook', { callbackUrl, error });
       return {
         success: false,
-        message: 'Failed to get storage statistics',
-        error: new StorageProviderError('Dropbox', 'getStorageStats', error)
+        message: 'Failed to register Dropbox webhook',
+        error: new StorageProviderError('dropbox', 'registerWebhook', error)
       };
     }
   }
-
+  
   /**
-   * Helper to convert a storage key to a Dropbox path (must start with /)
+   * Verify webhook signature from Dropbox
    */
-  private toDropboxPath(key: string): string {
-    if (!key || key === '/') {
-      return '';
+  verifyWebhook(signature: string, body: string): boolean {
+    if (!this.webhookSecret) {
+      this.logger.warn('Webhook secret not set for verification');
+      return false;
     }
-    return key.startsWith('/') ? key : `/${key}`;
+    
+    try {
+      const hmac = crypto.createHmac('sha256', this.webhookSecret);
+      hmac.update(body);
+      const calculatedSignature = hmac.digest('hex');
+      
+      return crypto.timingSafeEqual(
+        Buffer.from(calculatedSignature),
+        Buffer.from(signature)
+      );
+    } catch (error) {
+      this.logger.error('Failed to verify webhook signature', { error });
+      return false;
+    }
+  }
+  
+  /**
+   * Process webhook notification from Dropbox
+   */
+  async processWebhook(body: any): Promise<StorageOperationResult> {
+    try {
+      this.validateInitialized();
+      
+      if (!body.list_folder || !body.list_folder.accounts) {
+        return {
+          success: false,
+          message: 'Invalid webhook payload'
+        };
+      }
+      
+      // Get the latest changes for each path we're tracking
+      for (const [path, cursor] of this.cursorsByPath.entries()) {
+        const changes = await this.dropbox!.filesListFolderContinue({
+          cursor
+        });
+        
+        if (changes.result.entries.length > 0) {
+          // Update our cursor
+          this.cursorsByPath.set(path, changes.result.cursor);
+          
+          // Process each change
+          for (const entry of changes.result.entries) {
+            const event = entry['.tag'] === 'deleted' ? 'file:deleted' : 'file:changed';
+            
+            this.changeEmitter.emit(event, {
+              path: entry.path_display,
+              type: entry['.tag'],
+              fileId: 'id' in entry ? entry.id : undefined,
+              name: entry.name
+            });
+          }
+          
+          this.logger.info('Processed Dropbox changes', {
+            path,
+            changeCount: changes.result.entries.length
+          });
+        }
+      }
+      
+      return {
+        success: true,
+        message: 'Webhook processed successfully'
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to process webhook', { error });
+      return {
+        success: false,
+        message: 'Failed to process webhook',
+        error: new StorageProviderError('dropbox', 'processWebhook', error)
+      };
+    }
+  }
+  
+  /**
+   * Subscribe to file change events
+   */
+  onFileChange(event: 'file:changed' | 'file:deleted', callback: (fileInfo: any) => void): void {
+    this.changeEmitter.on(event, callback);
   }
 
   /**
-   * Helper to convert a Dropbox path to a storage key (remove leading /)
+   * Upload a file to Dropbox with progress tracking
    */
-  private fromDropboxPath(path: string): string {
-    if (!path) {
-      return '';
+  async uploadFile(
+    path: string, 
+    fileName: string, 
+    content: Buffer | Readable, 
+    options?: UploadOptions
+  ): Promise<StorageOperationResult & { fileId?: string }> {
+    try {
+      this.validateInitialized();
+      
+      const filePath = `${path}/${fileName}`.replace(/^\/+/, '/');
+      const contentType = options?.contentType || 'application/octet-stream';
+      const totalSize = options?.contentLength || (Buffer.isBuffer(content) ? content.length : null);
+      
+      // Buffer small files
+      if (Buffer.isBuffer(content) && content.length < 8 * 1024 * 1024) {
+        const response = await this.dropbox!.filesUpload({
+          path: filePath,
+          contents: content,
+          mode: { '.tag': 'overwrite' },
+          autorename: true
+        });
+        
+        return {
+          success: true,
+          message: 'File uploaded successfully',
+          fileId: response.result.id,
+          data: {
+            id: response.result.id,
+            name: response.result.name,
+            path: response.result.path_display,
+            size: response.result.size
+          }
+        };
+      }
+      
+      // For larger files or streams, use session upload with progress tracking
+      const response = await this.dropbox!.filesUploadSessionStart({
+        close: false,
+        contents: Buffer.isBuffer(content) ? content.slice(0, 1024 * 1024) : content
+      });
+      
+      const sessionId = response.result.session_id;
+      let uploadedBytes = Buffer.isBuffer(content) ? Math.min(content.length, 1024 * 1024) : 0;
+      
+      // Implement progress tracking
+      if (totalSize && options?.onProgress) {
+        options.onProgress({
+          bytes: uploadedBytes,
+          totalBytes: totalSize,
+          percent: Math.round((uploadedBytes / totalSize) * 100)
+        });
+      }
+      
+      // Continue upload in chunks for Buffer content
+      if (Buffer.isBuffer(content) && content.length > 1024 * 1024) {
+        const chunkSize = 8 * 1024 * 1024; // 8MB chunks
+        
+        for (let offset = 1024 * 1024; offset < content.length; offset += chunkSize) {
+          const chunk = content.slice(offset, offset + chunkSize);
+          const isLastChunk = offset + chunkSize >= content.length;
+          
+          await this.dropbox!.filesUploadSessionAppendV2({
+            cursor: {
+              session_id: sessionId,
+              offset: uploadedBytes
+            },
+            close: isLastChunk,
+            contents: chunk
+          });
+          
+          uploadedBytes += chunk.length;
+          
+          // Update progress
+          if (options?.onProgress) {
+            options.onProgress({
+              bytes: uploadedBytes,
+              totalBytes: totalSize!,
+              percent: Math.round((uploadedBytes / totalSize!) * 100)
+            });
+          }
+        }
+      }
+      
+      // Finish the upload session
+      const fileResult = await this.dropbox!.filesUploadSessionFinish({
+        cursor: {
+          session_id: sessionId,
+          offset: uploadedBytes
+        },
+        commit: {
+          path: filePath,
+          mode: { '.tag': 'overwrite' },
+          autorename: true
+        }
+      });
+      
+      // Final progress update
+      if (totalSize && options?.onProgress) {
+        options.onProgress({
+          bytes: totalSize,
+          totalBytes: totalSize,
+          percent: 100
+        });
+      }
+      
+      return {
+        success: true,
+        message: 'File uploaded successfully',
+        fileId: fileResult.result.id,
+        data: {
+          id: fileResult.result.id,
+          name: fileResult.result.name,
+          path: fileResult.result.path_display,
+          size: fileResult.result.size
+        }
+      };
+    } catch (error: any) {
+      this.logger.error('Failed to upload file', { path, fileName, error });
+      throw new StorageProviderError('dropbox', 'uploadFile', error);
     }
-    return path.startsWith('/') ? path.slice(1) : path;
   }
 
-  /**
-   * Get provider capabilities specific to Dropbox
-   */
   getCapabilities() {
+    const capabilities = super.getCapabilities();
     return {
-      ...super.getCapabilities(),
-      supportsMultipartUpload: false, // Dropbox has a different upload mechanism
+      ...capabilities,
       supportsRangeRequests: true,
-      supportsServerSideEncryption: false,
-      supportsVersioning: true,
       supportsFolderCreation: true,
-      supportsTags: false,
-      supportsMetadata: false,
-      maximumFileSize: 50 * 1024 * 1024 * 1024, // 50GB for Dropbox Business
-      maximumPartSize: 150 * 1024 * 1024, // 150MB for Dropbox upload session
-      minimumPartSize: 4 * 1024 * 1024, // 4MB recommended
-      maximumPartCount: 10000
+      supportsMetadata: true,
+      supportsProgressTracking: true,
+      supportsDirectUpload: true,
+      supportsWebhooks: true,
+      supportsChangeNotifications: true
     };
   }
 }

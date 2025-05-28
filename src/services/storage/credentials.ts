@@ -70,6 +70,7 @@ export interface WasabiCredentials {
   export interface OneDriveCredentials {
     clientId: string;
     clientSecret: string;
+    tenantId: string;
     refreshToken: string;
     accessToken?: string;
     expiryDate?: number;

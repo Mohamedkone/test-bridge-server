@@ -6,6 +6,7 @@ import { StorageService } from '../storage/storage.service';
 import { FileService, FileOperationResult } from './file.service';
 import { FileRepository } from '../../repositories/file.repository';
 import { NotFoundError, ValidationError } from '../../utils/errors';
+import { WebSocketService } from '../websocket/websocket.service';
 
 export interface MultipartUploadInfo {
   uploadId: string;
@@ -37,6 +38,7 @@ export class UploadService {
     @inject('StorageService') private storageService: StorageService,
     @inject('FileService') private fileService: FileService,
     @inject('FileRepository') private fileRepository: FileRepository,
+    @inject('WebSocketService') private wsService: WebSocketService,
     @inject('Logger') private logger: Logger
   ) {
     this.logger = logger.createChildLogger('UploadService');
@@ -249,7 +251,7 @@ export class UploadService {
   }
   
   /**
-   * Mark a part as completed
+   * Complete upload part
    */
   async completePart(
     uploadId: string,
@@ -272,37 +274,42 @@ export class UploadService {
         throw new ValidationError(`Invalid part number. Must be between 1 and ${uploadInfo.totalParts}`);
       }
       
-      // Add completed part
-      uploadInfo.partsCompleted.push(partNumber);
+      // Add part info
       uploadInfo.partsInfo.push({ partNumber, etag });
-      uploadInfo.updatedAt = new Date();
+      uploadInfo.partsCompleted.push(partNumber);
       
-      this.activeUploads.set(uploadId, uploadInfo);
+      // Calculate progress
+      const progress = (uploadInfo.partsCompleted.length / uploadInfo.totalParts) * 100;
       
-      this.logger.debug('Part uploaded successfully', { 
-        uploadId, 
-        partNumber, 
-        completed: uploadInfo.partsCompleted.length, 
-        total: uploadInfo.totalParts 
+      // Notify progress
+      this.wsService.notifyFileTransferStatus(uploadInfo.roomId, {
+        fileId: uploadInfo.fileId,
+        type: 'upload',
+        status: 'in_progress',
+        progress,
+        bytesTransferred: uploadInfo.partsCompleted.length * uploadInfo.partSize,
+        totalBytes: uploadInfo.totalSize,
+        userId: uploadInfo.userId
       });
+      
+      // Update upload info
+      uploadInfo.updatedAt = new Date();
+      this.activeUploads.set(uploadId, uploadInfo);
       
       return {
         success: true,
-        message: 'Part marked as completed',
+        message: 'Part completed successfully',
         data: {
-          uploadId,
           partNumber,
-          completedParts: uploadInfo.partsCompleted.length,
-          totalParts: uploadInfo.totalParts,
-          isComplete: uploadInfo.partsCompleted.length === uploadInfo.totalParts
+          progress
         }
       };
     } catch (error: any) {
-      this.logger.error('Error marking part as completed', { uploadId, partNumber, error });
+      this.logger.error('Error completing upload part', { uploadId, partNumber, error });
       
       return {
         success: false,
-        message: error.message || 'Failed to mark part as completed',
+        message: error.message || 'Failed to complete upload part',
         error
       };
     }
@@ -323,34 +330,24 @@ export class UploadService {
       if (uploadInfo.status !== 'in_progress') {
         throw new ValidationError(`Upload is in ${uploadInfo.status} state`);
       }
-
-      if (uploadInfo.partsCompleted.length !== uploadInfo.totalParts) {
-        throw new ValidationError(
-          `Not all parts are uploaded. Completed: ${uploadInfo.partsCompleted.length}/${uploadInfo.totalParts}`
-        );
-      }
       
-      // Sort parts by part number
-      const sortedParts = [...uploadInfo.partsInfo].sort((a, b) => a.partNumber - b.partNumber);
+      if (uploadInfo.partsCompleted.length !== uploadInfo.totalParts) {
+        throw new ValidationError('Not all parts have been uploaded');
+      }
       
       // Get provider
       const provider = await this.storageService.getStorageProvider(uploadInfo.storageId);
       
-      // Complete upload
+      // Complete multipart upload
       const completeResult = await provider.completeMultipartUpload(
         uploadInfo.storageKey,
         uploadInfo.uploadId,
-        sortedParts
+        uploadInfo.partsInfo
       );
       
       if (!completeResult.success) {
         throw new Error(completeResult.message || 'Failed to complete multipart upload');
       }
-      
-      // Update upload status
-      uploadInfo.status = 'completed';
-      uploadInfo.updatedAt = new Date();
-      this.activeUploads.set(uploadId, uploadInfo);
       
       // Create file record
       const fileResult = await this.fileService.uploadFile({
@@ -363,39 +360,52 @@ export class UploadService {
         storageId: uploadInfo.storageId,
         storageKey: uploadInfo.storageKey,
         metadata: uploadInfo.metadata
-        FileService
       });
       
       if (!fileResult.success) {
         throw new Error(fileResult.message || 'Failed to create file record');
       }
       
-      this.logger.info('Multipart upload completed successfully', { 
-        uploadId, 
-        fileId: uploadInfo.fileId, 
-        fileName: uploadInfo.fileName, 
-        totalSize: uploadInfo.totalSize 
-      });
+      // Update upload status
+      uploadInfo.status = 'completed';
+      uploadInfo.updatedAt = new Date();
+      this.activeUploads.set(uploadId, uploadInfo);
       
-      // Clean up upload info after successful completion
-      setTimeout(() => {
-        this.activeUploads.delete(uploadId);
-      }, 3600000); // Keep record for 1 hour
+      // Notify completion
+      this.wsService.notifyFileTransferStatus(uploadInfo.roomId, {
+        fileId: uploadInfo.fileId,
+        type: 'upload',
+        status: 'completed',
+        progress: 100,
+        bytesTransferred: uploadInfo.totalSize,
+        totalBytes: uploadInfo.totalSize,
+        userId: uploadInfo.userId
+      });
       
       return {
         success: true,
-        message: 'File uploaded successfully',
+        message: 'Multipart upload completed successfully',
         data: fileResult.data
       };
     } catch (error: any) {
       this.logger.error('Error completing multipart upload', { uploadId, error });
       
-      // Mark upload as failed
+      // Update upload status
       const uploadInfo = this.activeUploads.get(uploadId);
       if (uploadInfo) {
         uploadInfo.status = 'failed';
         uploadInfo.updatedAt = new Date();
         this.activeUploads.set(uploadId, uploadInfo);
+        
+        // Notify failure
+        this.wsService.notifyFileTransferStatus(uploadInfo.roomId, {
+          fileId: uploadInfo.fileId,
+          type: 'upload',
+          status: 'error',
+          progress: 0,
+          error: error.message,
+          userId: uploadInfo.userId
+        });
       }
       
       return {

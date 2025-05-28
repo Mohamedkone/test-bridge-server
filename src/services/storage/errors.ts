@@ -65,3 +65,16 @@ export class StorageProviderError extends StorageError {
     Object.defineProperty(this, 'statusCode', { value: 502 });
   }
 }
+
+/**
+ * Error thrown when storage quota has been exceeded
+ */
+export class StorageQuotaExceededError extends StorageError {
+  storageId: string;
+
+  constructor(storageId: string) {
+    super(`Storage quota exceeded for storage account ${storageId}`);
+    this.name = 'StorageQuotaExceededError';
+    this.storageId = storageId;
+  }
+}

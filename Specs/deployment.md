@@ -52,16 +52,19 @@ This document outlines the deployment architecture for the file transfer applica
 We maintain four distinct environments, each with its own dedicated infrastructure:
 
 1. **Development (Dev)**
+
    - Purpose: Individual developer testing
    - Scale: Minimal resources, single-node deployments
    - Data: Sanitized subset of production data
 
 2. **Testing/QA**
+
    - Purpose: Integration testing, QA, automated tests
    - Scale: Similar to production but smaller scale
    - Data: Regularly refreshed test data
 
 3. **Staging**
+
    - Purpose: Pre-production validation, performance testing
    - Scale: Mirrors production configuration
    - Data: Anonymized copy of production data
@@ -129,6 +132,7 @@ CMD ["node", "dist/server.js"]
 ### Container Registry
 
 All Docker images are stored in Amazon Elastic Container Registry (ECR) with:
+
 - Immutable tags
 - Vulnerability scanning enabled
 - Lifecycle policies to clean old images
@@ -140,7 +144,7 @@ All Docker images are stored in Amazon Elastic Container Registry (ECR) with:
 We use EKS (Elastic Kubernetes Service) with the following configuration:
 
 - **Cluster Version**: 1.27 or newer
-- **Node Types**: 
+- **Node Types**:
   - General purpose: m6a.xlarge for API and WebSocket nodes
   - Compute optimized: c6a.2xlarge for worker nodes
 - **Auto-scaling**: Enabled with min 3, max 15 nodes per node group
@@ -149,6 +153,7 @@ We use EKS (Elastic Kubernetes Service) with the following configuration:
 ### Resource Organization
 
 - **Namespaces**:
+
   - `file-transfer-api`: API services
   - `file-transfer-websocket`: WebSocket services
   - `file-transfer-worker`: Background job workers
@@ -157,11 +162,11 @@ We use EKS (Elastic Kubernetes Service) with the following configuration:
 
 - **Resource Requests and Limits**:
 
-  | Component | CPU Request | CPU Limit | Memory Request | Memory Limit |
-  |-----------|-------------|-----------|----------------|--------------|
-  | API Server | 250m | 1000m | 512Mi | 1Gi |
-  | WebSocket Node | 500m | 2000m | 512Mi | 1Gi |
-  | Worker Node | 500m | 4000m | 1Gi | 4Gi |
+  | Component      | CPU Request | CPU Limit | Memory Request | Memory Limit |
+  | -------------- | ----------- | --------- | -------------- | ------------ |
+  | API Server     | 250m        | 1000m     | 512Mi          | 1Gi          |
+  | WebSocket Node | 500m        | 2000m     | 512Mi          | 1Gi          |
+  | Worker Node    | 500m        | 4000m     | 1Gi            | 4Gi          |
 
 ### Pod Deployment Example
 
@@ -187,63 +192,63 @@ spec:
         app: api-server
     spec:
       containers:
-      - name: api-server
-        image: ${ECR_REPOSITORY_URI}/file-transfer-api:${IMAGE_TAG}
-        ports:
-        - containerPort: 3000
-        env:
-        - name: NODE_ENV
-          value: "production"
-        - name: PORT
-          value: "3000"
-        - name: MYSQL_HOST
-          valueFrom:
-            secretKeyRef:
-              name: db-credentials
-              key: host
-        - name: MYSQL_USER
-          valueFrom:
-            secretKeyRef:
-              name: db-credentials
-              key: username
-        - name: MYSQL_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: db-credentials
-              key: password
-        - name: MYSQL_DATABASE
-          value: "filetransfer"
-        - name: REDIS_HOST
-          valueFrom:
-            configMapKeyRef:
-              name: redis-config
-              key: host
-        - name: AUTH0_DOMAIN
-          valueFrom:
-            configMapKeyRef:
-              name: auth-config
-              key: auth0-domain
-        resources:
-          requests:
-            cpu: 250m
-            memory: 512Mi
-          limits:
-            cpu: 1000m
-            memory: 1Gi
-        readinessProbe:
-          httpGet:
-            path: /health
-            port: 3000
-          initialDelaySeconds: 10
-          periodSeconds: 5
-        livenessProbe:
-          httpGet:
-            path: /health
-            port: 3000
-          initialDelaySeconds: 30
-          periodSeconds: 15
+        - name: api-server
+          image: ${ECR_REPOSITORY_URI}/file-transfer-api:${IMAGE_TAG}
+          ports:
+            - containerPort: 3000
+          env:
+            - name: NODE_ENV
+              value: "production"
+            - name: PORT
+              value: "3000"
+            - name: MYSQL_HOST
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: host
+            - name: MYSQL_USER
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: username
+            - name: MYSQL_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: db-credentials
+                  key: password
+            - name: MYSQL_DATABASE
+              value: "filetransfer"
+            - name: REDIS_HOST
+              valueFrom:
+                configMapKeyRef:
+                  name: redis-config
+                  key: host
+            - name: AUTH0_DOMAIN
+              valueFrom:
+                configMapKeyRef:
+                  name: auth-config
+                  key: auth0-domain
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 3000
+            initialDelaySeconds: 30
+            periodSeconds: 15
       imagePullSecrets:
-      - name: ecr-credentials
+        - name: ecr-credentials
 ```
 
 ### Service Mesh
@@ -280,54 +285,54 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [ main, develop ]
+    branches: [main, develop]
   pull_request:
-    branches: [ main, develop ]
+    branches: [main, develop]
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Set up Node.js
         uses: actions/setup-node@v3
         with:
-          node-version: '18'
-          cache: 'npm'
-      
+          node-version: "18"
+          cache: "npm"
+
       - name: Install dependencies
         run: npm ci
-      
+
       - name: Lint code
         run: npm run lint
-      
+
       - name: Run tests
         run: npm run test
-      
+
       - name: Upload test results
         uses: actions/upload-artifact@v3
         with:
           name: test-results
           path: coverage/
-  
+
   build:
     needs: test
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-      
+
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v1
-      
+
       - name: Build, tag, and push API image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -338,7 +343,7 @@ jobs:
           docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-      
+
       - name: Build, tag, and push WebSocket image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -347,7 +352,7 @@ jobs:
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f docker/websocket.Dockerfile .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-      
+
       - name: Build, tag, and push Worker image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
@@ -356,35 +361,35 @@ jobs:
         run: |
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG -f docker/worker.Dockerfile .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-  
+
   deploy-dev:
     needs: build
     if: github.ref == 'refs/heads/develop'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-      
+
       - name: Setup Kubernetes tools
         uses: azure/setup-kubectl@v3
         with:
-          version: 'latest'
-      
+          version: "latest"
+
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name file-transfer-dev-cluster --region us-east-1
-      
+
       - name: Deploy to dev environment
         run: |
           # Replace image tags in Kubernetes manifests
           sed -i "s|\${IMAGE_TAG}|${{ github.sha }}|g" kubernetes/dev/*
           sed -i "s|\${ECR_REPOSITORY_URI}|${{ steps.login-ecr.outputs.registry }}|g" kubernetes/dev/*
-          
+
           # Apply Kubernetes manifests
           kubectl apply -f kubernetes/dev/
 
@@ -395,29 +400,29 @@ jobs:
     environment: staging
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-      
+
       - name: Setup Kubernetes tools
         uses: azure/setup-kubectl@v3
         with:
-          version: 'latest'
-      
+          version: "latest"
+
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name file-transfer-staging-cluster --region us-east-1
-      
+
       - name: Deploy to staging environment
         run: |
           sed -i "s|\${IMAGE_TAG}|${{ github.sha }}|g" kubernetes/staging/*
           sed -i "s|\${ECR_REPOSITORY_URI}|${{ steps.login-ecr.outputs.registry }}|g" kubernetes/staging/*
-          
+
           kubectl apply -f kubernetes/staging/
-  
+
   deploy-production:
     needs: deploy-staging
     runs-on: ubuntu-latest
@@ -426,27 +431,27 @@ jobs:
       url: https://filetransfer.example.com
     steps:
       - uses: actions/checkout@v3
-      
+
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v1
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: us-east-1
-      
+
       - name: Setup Kubernetes tools
         uses: azure/setup-kubectl@v3
         with:
-          version: 'latest'
-      
+          version: "latest"
+
       - name: Update kubeconfig
         run: aws eks update-kubeconfig --name file-transfer-prod-cluster --region us-east-1
-      
+
       - name: Deploy to production environment
         run: |
           sed -i "s|\${IMAGE_TAG}|${{ github.sha }}|g" kubernetes/production/*
           sed -i "s|\${ECR_REPOSITORY_URI}|${{ steps.login-ecr.outputs.registry }}|g" kubernetes/production/*
-          
+
           kubectl apply -f kubernetes/production/
 ```
 
@@ -487,13 +492,13 @@ terraform/
 ```hcl
 module "eks" {
   source = "../../modules/eks"
-  
+
   cluster_name    = "file-transfer-${var.environment}"
   cluster_version = "1.27"
-  
+
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
-  
+
   node_groups = {
     api = {
       desired_capacity = 3
@@ -505,7 +510,7 @@ module "eks" {
       }
       taints = []
     }
-    
+
     websocket = {
       desired_capacity = 3
       max_capacity     = 10
@@ -516,7 +521,7 @@ module "eks" {
       }
       taints = []
     }
-    
+
     worker = {
       desired_capacity = 2
       max_capacity     = 8
@@ -532,7 +537,7 @@ module "eks" {
       }]
     }
   }
-  
+
   map_roles = [
     {
       rolearn  = "arn:aws:iam::${var.account_id}:role/DeploymentRole"
@@ -540,7 +545,7 @@ module "eks" {
       groups   = ["system:masters"]
     }
   ]
-  
+
   tags = {
     Environment = var.environment
     Application = "file-transfer"
@@ -563,11 +568,13 @@ All sensitive configuration is managed through AWS Secrets Manager with:
 ### Horizontal Scaling
 
 1. **Kubernetes Horizontal Pod Autoscaler (HPA)**
+
    - CPU threshold: 70%
    - Memory threshold: 80%
    - Custom metrics: Request latency, queue depth
 
    Example HPA configuration:
+
    ```yaml
    apiVersion: autoscaling/v2
    kind: HorizontalPodAutoscaler
@@ -582,25 +589,25 @@ All sensitive configuration is managed through AWS Secrets Manager with:
      minReplicas: 3
      maxReplicas: 15
      metrics:
-     - type: Resource
-       resource:
-         name: cpu
-         target:
-           type: Utilization
-           averageUtilization: 70
-     - type: Resource
-       resource:
-         name: memory
-         target:
-           type: Utilization
-           averageUtilization: 80
-     - type: Pods
-       pods:
-         metric:
-           name: http_requests_per_second
-         target:
-           type: AverageValue
-           averageValue: 1000
+       - type: Resource
+         resource:
+           name: cpu
+           target:
+             type: Utilization
+             averageUtilization: 70
+       - type: Resource
+         resource:
+           name: memory
+           target:
+             type: Utilization
+             averageUtilization: 80
+       - type: Pods
+         pods:
+           metric:
+             name: http_requests_per_second
+           target:
+             type: AverageValue
+             averageValue: 1000
    ```
 
 2. **Cluster Autoscaler**
@@ -610,6 +617,7 @@ All sensitive configuration is managed through AWS Secrets Manager with:
 ### Vertical Scaling
 
 1. **Vertical Pod Autoscaler**
+
    - Monitors resource usage and recommends limits
    - Automatically adjusts resource requests
 
@@ -637,6 +645,7 @@ All components are distributed across multiple Availability Zones:
 ### Database Resilience
 
 1. **Primary-Replica Architecture**
+
    - Automated failover
    - Continuous backups
 
@@ -647,6 +656,7 @@ All components are distributed across multiple Availability Zones:
 ### Redis Resilience
 
 1. **Redis Cluster Mode**
+
    - Multiple masters with replicas
    - Automatic shard rebalancing
 
@@ -667,15 +677,18 @@ All components are distributed across multiple Availability Zones:
 We use a comprehensive monitoring stack integrated with AWS services:
 
 1. **Infrastructure Monitoring**
+
    - AWS CloudWatch
    - Prometheus (for Kubernetes metrics)
    - Grafana (visualization)
 
 2. **Application Performance Monitoring**
+
    - New Relic
    - Custom metrics
 
 3. **Log Management**
+
    - ELK Stack (Elasticsearch, Logstash, Kibana)
    - Centralized logging with structured logs
 
@@ -686,11 +699,13 @@ We use a comprehensive monitoring stack integrated with AWS services:
 ### Key Metrics
 
 1. **System Metrics**
+
    - CPU/Memory utilization
    - Network throughput
    - Disk usage
 
 2. **Application Metrics**
+
    - Request rate
    - Error rate
    - Response time (P50, P90, P99)
@@ -698,6 +713,7 @@ We use a comprehensive monitoring stack integrated with AWS services:
    - Active WebSocket connections
 
 3. **Business Metrics**
+
    - Active users
    - Files uploaded/downloaded
    - Storage usage
@@ -714,11 +730,13 @@ We use a comprehensive monitoring stack integrated with AWS services:
 Custom Grafana dashboards for different stakeholders:
 
 1. **Operations Dashboard**
+
    - System health
    - Alert status
    - Resource utilization
 
 2. **Developer Dashboard**
+
    - Service-level metrics
    - Error breakdown
    - Performance bottlenecks
@@ -944,11 +962,13 @@ spec:
 Alerts are configured for critical metrics with appropriate thresholds:
 
 1. **Availability Alerts**
+
    - Success rate below 99.5%
    - Increased error rates
    - Service unavailability
 
 2. **Performance Alerts**
+
    - P95 latency > 500ms
    - Slow database queries
    - High CPU/memory usage
@@ -961,17 +981,18 @@ Alerts are configured for critical metrics with appropriate thresholds:
 ### Incident Response
 
 1. **On-Call Rotation**
+
    - PagerDuty integration
    - Follow-the-sun coverage
 
 2. **Incident Severity Levels**
 
-   | Level | Description | Response Time | Escalation |
-   |-------|-------------|---------------|------------|
-   | P1 | Critical Service Outage | Immediate | All hands |
-   | P2 | Partial Service Disruption | < 15 min | Team Lead |
-   | P3 | Performance Degradation | < 30 min | Engineer |
-   | P4 | Non-critical Issue | < 4 hours | Engineer |
+   | Level | Description                | Response Time | Escalation |
+   | ----- | -------------------------- | ------------- | ---------- |
+   | P1    | Critical Service Outage    | Immediate     | All hands  |
+   | P2    | Partial Service Disruption | < 15 min      | Team Lead  |
+   | P3    | Performance Degradation    | < 30 min      | Engineer   |
+   | P4    | Non-critical Issue         | < 4 hours     | Engineer   |
 
 3. **Runbooks**
    - Detailed troubleshooting steps
@@ -983,11 +1004,13 @@ Alerts are configured for critical metrics with appropriate thresholds:
 ### Backup Strategy
 
 1. **Database Backups**
+
    - Automated daily full backups
    - Point-in-time recovery
    - 30-day retention
 
 2. **Configuration Backups**
+
    - Infrastructure as Code repositories
    - Kubernetes manifests
    - Application configurations
@@ -1000,19 +1023,19 @@ Alerts are configured for critical metrics with appropriate thresholds:
 ### Backup Implementation
 
 ```hcl
-resource "aws_db_instance" "mysql_main" {
+resource "aws_MYSQL_instance" "mysql_main" {
   # ... other configuration ...
-  
+
   backup_retention_period = 30
   backup_window           = "03:00-05:00"
   copy_tags_to_snapshot   = true
   delete_automated_backups = false
-  
+
   performance_insights_enabled = true
   performance_insights_retention_period = 7
-  
+
   storage_encrypted = true
-  
+
   lifecycle {
     prevent_destroy = true
   }
@@ -1025,7 +1048,7 @@ resource "aws_backup_plan" "file_transfer_backup" {
     rule_name         = "daily-backup"
     target_vault_name = aws_backup_vault.file_transfer_vault.name
     schedule          = "cron(0 5 * * ? *)"
-    
+
     lifecycle {
       delete_after = 30
     }
@@ -1038,6 +1061,7 @@ resource "aws_backup_plan" "file_transfer_backup" {
 ### Network Security
 
 1. **VPC Configuration**
+
    - Private subnets for application components
    - Public subnets only for load balancers
    - Security groups with least privilege access
@@ -1050,6 +1074,7 @@ resource "aws_backup_plan" "file_transfer_backup" {
 ### Secret Management
 
 1. **AWS Secrets Manager**
+
    - Automatic rotation
    - IAM-controlled access
 
@@ -1060,6 +1085,7 @@ resource "aws_backup_plan" "file_transfer_backup" {
 ### Access Controls
 
 1. **RBAC for Kubernetes**
+
    - Role-based access control
    - Service accounts with limited permissions
 
@@ -1072,6 +1098,7 @@ resource "aws_backup_plan" "file_transfer_backup" {
 ### Resource Optimization
 
 1. **CPU and Memory Tuning**
+
    - Node.js garbage collection optimization
    - Memory limits adjusted to application needs
 
@@ -1083,6 +1110,7 @@ resource "aws_backup_plan" "file_transfer_backup" {
 ### Network Optimization
 
 1. **Content Delivery Network (CDN)**
+
    - CloudFront for static assets
    - Edge caching
 
@@ -1095,6 +1123,7 @@ resource "aws_backup_plan" "file_transfer_backup" {
 ### Resource Management
 
 1. **Right-sizing Instances**
+
    - Regular resource usage analysis
    - Scaling down during off-hours
 
@@ -1105,6 +1134,7 @@ resource "aws_backup_plan" "file_transfer_backup" {
 ### Storage Optimization
 
 1. **Tiered Storage**
+
    - S3 Intelligent Tiering for cold data
    - S3 Standard for hot data
 
@@ -1115,6 +1145,7 @@ resource "aws_backup_plan" "file_transfer_backup" {
 ### Cost Monitoring
 
 1. **AWS Cost Explorer**
+
    - Resource tagging for cost allocation
    - Budget alerts
 

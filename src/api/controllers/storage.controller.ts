@@ -16,28 +16,9 @@ export class StorageController {
   }
 
   /**
-   * List available storage providers
+   * Get all storage accounts for a company
    */
-  async getProviders(req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      const providers = this.storageService.getProviderTypes();
-      
-      res.json({
-        success: true,
-        data: providers.map(type => ({
-          type,
-          name: this.getProviderDisplayName(type)
-        }))
-      });
-    } catch (error) {
-      next(error);
-    }
-  }
-
-  /**
-   * List company storage accounts
-   */
-  async getCompanyStorageAccounts(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getStorageAccounts(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
       const { companyId } = req.params;
       
@@ -45,7 +26,7 @@ export class StorageController {
         throw new ValidationError('Company ID is required');
       }
       
-      const accounts = await this.storageService.getCompanyStorageAccounts(companyId);
+      const accounts = await this.storageService.getStorageAccounts(companyId);
       
       res.json({
         success: true,
@@ -57,7 +38,7 @@ export class StorageController {
   }
 
   /**
-   * Get storage account details
+   * Get a specific storage account
    */
   async getStorageAccount(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
@@ -70,7 +51,14 @@ export class StorageController {
       const account = await this.storageService.getStorageAccount(id);
       
       if (!account) {
-        throw new ValidationError(`Storage account not found: ${id}`);
+        res.status(404).json({
+          success: false,
+          error: {
+            code: 'NOT_FOUND',
+            message: 'Storage account not found'
+          }
+        });
+        return;
       }
       
       res.json({
@@ -90,24 +78,18 @@ export class StorageController {
       const { name, companyId, storageType, isDefault, credentials } = req.body;
       
       if (!name || !companyId || !storageType || !credentials) {
-        throw new ValidationError('Missing required fields: name, companyId, storageType, credentials');
-      }
-      
-      // Validate storageType
-      const availableProviders = this.storageService.getProviderTypes();
-      if (!availableProviders.includes(storageType as StorageProviderType)) {
-        throw new ValidationError(`Invalid storage provider type: ${storageType}. Available types: ${availableProviders.join(', ')}`);
+        throw new ValidationError('Name, company ID, storage type, and credentials are required');
       }
       
       const account = await this.storageService.createStorageAccount({
         name,
         companyId,
-        storageType: storageType as StorageProviderType,
-        isDefault: isDefault === true,
+        storageType,
+        isDefault,
         credentials
       });
       
-      res.json({
+      res.status(201).json({
         success: true,
         data: account
       });
@@ -126,11 +108,6 @@ export class StorageController {
       
       if (!id) {
         throw new ValidationError('Storage account ID is required');
-      }
-      
-      // Make sure at least one field is provided
-      if (name === undefined && isDefault === undefined) {
-        throw new ValidationError('At least one field to update is required');
       }
       
       const account = await this.storageService.updateStorageAccount(id, {
@@ -158,11 +135,34 @@ export class StorageController {
         throw new ValidationError('Storage account ID is required');
       }
       
-      const result = await this.storageService.deleteStorageAccount(id);
+      const success = await this.storageService.deleteStorageAccount(id);
       
       res.json({
-        success: result,
-        message: result ? 'Storage account deleted successfully' : 'Failed to delete storage account'
+        success,
+        message: success ? 'Storage account deleted successfully' : 'Failed to delete storage account'
+      });
+    } catch (error) {
+      next(error);
+    }
+  }
+
+  /**
+   * Update storage account credentials
+   */
+  async updateCredentials(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { credentials } = req.body;
+      
+      if (!id || !credentials) {
+        throw new ValidationError('Storage account ID and credentials are required');
+      }
+      
+      const success = await this.storageService.updateCredentials(id, credentials);
+      
+      res.json({
+        success,
+        message: success ? 'Credentials updated successfully' : 'Failed to update credentials'
       });
     } catch (error) {
       next(error);
@@ -192,26 +192,18 @@ export class StorageController {
   }
 
   /**
-   * Update credentials for a storage account
+   * Get available storage provider types
    */
-  async updateCredentials(req: Request, res: Response, next: NextFunction): Promise<void> {
+  async getProviderTypes(req: Request, res: Response, next: NextFunction): Promise<void> {
     try {
-      const { id } = req.params;
-      const { credentials } = req.body;
-      
-      if (!id) {
-        throw new ValidationError('Storage account ID is required');
-      }
-      
-      if (!credentials) {
-        throw new ValidationError('Credentials are required');
-      }
-      
-      const result = await this.storageService.updateCredentials(id, credentials);
+      const providers = this.storageService.getAvailableProviders().map(type => ({
+        type,
+        displayName: this.getProviderDisplayName(type)
+      }));
       
       res.json({
-        success: result,
-        message: result ? 'Credentials updated successfully' : 'Failed to update credentials'
+        success: true,
+        data: providers
       });
     } catch (error) {
       next(error);
@@ -219,30 +211,20 @@ export class StorageController {
   }
 
   /**
-   * Validate credentials for a storage provider type
+   * Helper to get display name for provider type
    */
-  async validateCredentials(req: Request, res: Response, next: NextFunction): Promise<void> {
-    try {
-      const { storageType, credentials } = req.body;
-      
-      if (!storageType || !credentials) {
-        throw new ValidationError('Storage type and credentials are required');
-      }
-      
-      const result = await this.storageService.validateCredentials(
-        storageType as StorageProviderType, 
-        credentials
-      );
-      
-      res.json({
-        success: true,
-        data: {
-          valid: result
-        }
-      });
-    } catch (error) {
-      next(error);
-    }
+  private getProviderDisplayName(type: string): string {
+    const displayNames: Record<string, string> = {
+      'vault': 'Internal Storage (Wasabi)',
+      'cloud': 'Storj Decentralized Cloud Storage',
+      's3': 'Amazon S3',
+      'google_drive': 'Google Drive',
+      'dropbox': 'Dropbox',
+      'azure_blob': 'Microsoft Azure Blob Storage',
+      'gcp_storage': 'Google Cloud Storage'
+    };
+
+    return displayNames[type] || type;
   }
 
   /**
@@ -278,37 +260,106 @@ export class StorageController {
         throw new ValidationError('Storage account ID is required');
       }
       
-      const result = await this.storageService.getStorageUsage(id);
-      
-      if (!result.success || !result.stats) {
-        throw new Error(result.message || 'Failed to get storage statistics');
-      }
+      const stats = await this.storageService.getStorageStats(id, false);
       
       res.json({
         success: true,
-        data: result.stats
+        data: stats
       });
     } catch (error) {
       next(error);
     }
   }
 
-  /**
-   * Helper to get display name for provider type
-   */
-  private getProviderDisplayName(type: string): string {
-    const displayNames: Record<string, string> = {
-      'wasabi': 'Wasabi Cloud Storage',
-      'storj': 'Storj Decentralized Cloud Storage',
-      'aws-s3': 'Amazon S3',
-      'google-drive': 'Google Drive',
-      'dropbox': 'Dropbox',
-      'azure-blob': 'Microsoft Azure Blob Storage',
-      'onedrive': 'Microsoft OneDrive',
-      'gcp-storage': 'Google Cloud Storage',
-      's3-compatible': 'S3-Compatible Storage'
-    };
+  // Add new methods to expose storage stats and quota management
+  async getStorageStats(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { id } = req.params;
+      
+      // Check if user has access to the storage account
+      const storage = await this.storageService.getStorageAccount(id);
+      if (!storage || storage.companyId !== req.user.companyId) {
+        res.status(403).json({ error: 'Access denied to storage account' });
+        return;
+      }
+      
+      // Get storage stats with optional force refresh
+      const forceRefresh = req.query.refresh === 'true';
+      const stats = await this.storageService.getStorageStats(id, forceRefresh);
+      
+      res.json(stats);
+    } catch (error: any) {
+      this.logger.error('Failed to get storage stats', { error: error.message });
+      res.status(500).json({ error: 'Failed to get storage stats' });
+    }
+  }
 
-    return displayNames[type] || type;
+  async getAllStorageAccountsWithUsage(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const companyId = req.user.companyId;
+      const accounts = await this.storageService.getStorageAccountsWithUsage(companyId);
+      
+      res.json(accounts);
+    } catch (error: any) {
+      this.logger.error('Failed to get storage accounts with usage', { error: error.message });
+      res.status(500).json({ error: 'Failed to get storage accounts with usage' });
+    }
+  }
+
+  async uploadWithProgress(req: Request, res: Response, next: NextFunction): Promise<void> {
+    try {
+      const { id } = req.params;
+      const { path = '/' } = req.query;
+      
+      // Check if user has access to the storage account
+      const storage = await this.storageService.getStorageAccount(id);
+      if (!storage || storage.companyId !== req.user.companyId) {
+        res.status(403).json({ error: 'Access denied to storage account' });
+        return;
+      }
+      
+      if (!req.file) {
+        res.status(400).json({ error: 'No file uploaded' });
+        return;
+      }
+      
+      // Track upload progress
+      let lastProgress = 0;
+      const progressCallback = (progress: any) => {
+        // Only send progress updates when there's significant change (every 5%)
+        if (progress.percent - lastProgress >= 5) {
+          lastProgress = progress.percent;
+          // If this were a WebSocket connection, we could send progress updates
+          // this.webSocketService.sendToUser(req.user.id, 'upload:progress', {
+          //   storageId: id,
+          //   fileName: req.file!.originalname,
+          //   progress
+          // });
+        }
+      };
+      
+      // Upload the file with progress tracking
+      const fileMetadata = await this.storageService.uploadFile(
+        id,
+        path as string,
+        req.file.originalname,
+        req.file.buffer,
+        {
+          contentType: req.file.mimetype,
+          onProgress: progressCallback
+        }
+      );
+      
+      res.status(201).json(fileMetadata);
+    } catch (error: any) {
+      this.logger.error('Failed to upload file', { error: error.message });
+      
+      if (error.name === 'StorageQuotaExceededError') {
+        res.status(413).json({ error: 'Storage quota exceeded' });
+        return;
+      }
+      
+      res.status(500).json({ error: 'Failed to upload file' });
+    }
   }
 }

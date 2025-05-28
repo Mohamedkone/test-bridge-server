@@ -1,0 +1,1639 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+    <title>LockBridge API Test Interface</title>
+    <script src="https://cdn.auth0.com/js/auth0-spa-js/2.0.4/auth0-spa-js.production.js"></script>
+    <style>
+        :root {
+            --primary-color: #0078d7;
+            --primary-hover: #005a9e;
+            --success-color: #28a745;
+            --error-color: #dc3545;
+            --warning-color: #ffc107;
+            --text-color: #333;
+            --border-color: #ddd;
+            --bg-light: #f8f9fa;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            padding: 20px;
+            max-width: 1200px;
+            margin: 0 auto;
+            color: var(--text-color);
+            line-height: 1.6;
+        }
+
+        .container {
+            display: grid;
+            grid-template-columns: 300px 1fr;
+            gap: 20px;
+        }
+
+        .sidebar {
+            background: var(--bg-light);
+            padding: 20px;
+            border-radius: 8px;
+            position: sticky;
+            top: 20px;
+            height: fit-content;
+        }
+
+        .main-content {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+        }
+
+        .panel {
+            background: white;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0, 0, 0, 0.05);
+        }
+
+        .tabs {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 20px;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 10px;
+        }
+
+        .tab {
+            padding: 10px 20px;
+            cursor: pointer;
+            border-radius: 4px;
+            transition: all 0.3s ease;
+        }
+
+        .tab.active {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
+
+        button {
+            padding: 8px 16px;
+            background-color: var(--primary-color);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.3s ease;
+        }
+
+        button:hover:not(:disabled) {
+            background-color: var(--primary-hover);
+        }
+
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+
+        input,
+        select,
+        textarea {
+            width: 100%;
+            padding: 8px;
+            margin: 5px 0;
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            box-sizing: border-box;
+        }
+
+        .form-group {
+            margin-bottom: 15px;
+        }
+
+        .form-group label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        .status {
+            padding: 5px 10px;
+            border-radius: 3px;
+            display: inline-block;
+            margin-left: 10px;
+            font-size: 14px;
+        }
+
+        .connected {
+            background-color: #dff0d8;
+            color: #3c763d;
+        }
+
+        .disconnected {
+            background-color: #f2dede;
+            color: #a94442;
+        }
+
+        pre {
+            background: var(--bg-light);
+            padding: 15px;
+            border-radius: 4px;
+            overflow-x: auto;
+            margin: 10px 0;
+        }
+
+        .loading {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(255, 255, 255, 0.8);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+        }
+
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 5px solid #f3f3f3;
+            border-top: 5px solid var(--primary-color);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+        }
+
+        @keyframes spin {
+            0% {
+                transform: rotate(0deg);
+            }
+
+            100% {
+                transform: rotate(360deg);
+            }
+        }
+
+        .company-card {
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 15px;
+            margin-bottom: 10px;
+            background: white;
+        }
+
+        .company-card h3 {
+            margin: 0 0 10px 0;
+            color: var(--primary-color);
+        }
+
+        .company-card p {
+            margin: 5px 0;
+        }
+
+        .error-message {
+            color: var(--error-color);
+            padding: 10px;
+            background: #f8d7da;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+
+        .success-message {
+            color: var(--success-color);
+            padding: 10px;
+            background: #d4edda;
+            border-radius: 4px;
+            margin: 10px 0;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>LockBridge API Test Interface <span id="dockerStatus" class="status disconnected">Docker: Not Connected</span>
+    </h1>
+
+    <div class="container">
+        <div class="sidebar">
+            <div class="panel">
+                <h3>Configuration</h3>
+                <div class="form-group">
+                    <label for="apiUrl">API URL:</label>
+                    <input type="text" id="apiUrl" value="http://localhost:3000/api">
+                </div>
+                <div class="form-group">
+                    <label for="auth0Domain">Auth0 Domain:</label>
+                    <input type="text" id="auth0Domain" value="dev-4u1g8koi633jnnhf.us.auth0.com">
+                </div>
+                <div class="form-group">
+                    <label for="auth0ClientId">Auth0 Client ID:</label>
+                    <input type="text" id="auth0ClientId" value="TFqFkL0TM8iFXvpf1GhC6tn1Y1v9jzGe">
+                </div>
+                <div class="form-group">
+                    <label for="auth0Audience">Auth0 Audience:</label>
+                    <input type="text" id="auth0Audience" value="https://dev-4u1g8koi633jnnhf.us.auth0.com/api/v2/">
+                </div>
+                <button id="testConnection">Test Connection</button>
+            </div>
+
+            <div class="panel">
+                <h3>Authentication</h3>
+                <button id="loginBtn">Login</button>
+                <button id="logoutBtn" disabled>Logout</button>
+                <div id="authStatus">Not logged in</div>
+            </div>
+        </div>
+
+        <div class="main-content">
+            <div class="tabs">
+                <div class="tab active" data-tab="companies">Companies</div>
+                <div class="tab" data-tab="members">Members</div>
+                <div class="tab" data-tab="settings">Settings</div>
+                <div class="tab" data-tab="storage">Storage</div>
+                <div class="tab" data-tab="rooms">Rooms</div>
+            </div>
+
+            <div class="tab-content active" id="companies-tab">
+                <div class="panel">
+                    <h2>Company Management</h2>
+                    <div class="form-group">
+                        <label for="companyName">Company Name:</label>
+                        <input type="text" id="companyName" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="companyDescription">Description:</label>
+                        <textarea id="companyDescription"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="companyWebsite">Website:</label>
+                        <input type="url" id="companyWebsite">
+                    </div>
+                    <div class="form-group">
+                        <label for="companyIndustry">Industry:</label>
+                        <input type="text" id="companyIndustry">
+                    </div>
+                    <div class="form-group">
+                        <label for="companySize">Size:</label>
+                        <select id="companySize">
+                            <option value="">Select size...</option>
+                            <option value="1-10">1-10 employees</option>
+                            <option value="11-50">11-50 employees</option>
+                            <option value="51-200">51-200 employees</option>
+                            <option value="201-500">201-500 employees</option>
+                            <option value="501+">501+ employees</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="companyLocation">Location:</label>
+                        <input type="text" id="companyLocation">
+                    </div>
+                    <button id="createCompanyBtn" disabled>Create Company</button>
+                    <button id="searchCompaniesBtn" disabled>Search Companies</button>
+                </div>
+
+                <div class="panel">
+                    <h2>Search Results</h2>
+                    <div id="searchResults"></div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="members-tab">
+                <div class="panel">
+                    <h2>Member Management</h2>
+                    <div class="form-group">
+                        <label for="memberEmail">Email:</label>
+                        <input type="email" id="memberEmail" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="memberRole">Role:</label>
+                        <select id="memberRole">
+                            <option value="admin">Admin</option>
+                            <option value="member">Member</option>
+                            <option value="viewer">Viewer</option>
+                        </select>
+                    </div>
+                    <button id="addMemberBtn" disabled>Add Member</button>
+                    <button id="listMembersBtn" disabled>List Members</button>
+                </div>
+
+                <div class="panel">
+                    <h2>Members List</h2>
+                    <div id="membersList"></div>
+                </div>
+            </div>
+
+            <div class="tab-content" id="settings-tab">
+                <div class="panel">
+                    <h2>Company Settings</h2>
+                    <div class="form-group">
+                        <label for="settingsNotifications">Notifications:</label>
+                        <select id="settingsNotifications">
+                            <option value="all">All notifications</option>
+                            <option value="important">Important only</option>
+                            <option value="none">None</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="settingsSecurity">Security Level:</label>
+                        <select id="settingsSecurity">
+                            <option value="standard">Standard</option>
+                            <option value="high">High</option>
+                            <option value="strict">Strict</option>
+                        </select>
+                    </div>
+                    <button id="updateSettingsBtn" disabled>Update Settings</button>
+                    <button id="getSettingsBtn" disabled>Get Settings</button>
+                </div>
+
+                <div class="panel">
+                    <h2>Current Settings</h2>
+                    <pre id="settingsDisplay">No settings loaded</pre>
+                </div>
+            </div>
+
+            <div class="tab-content" id="storage-tab">
+                <div class="panel">
+                    <h2>Storage Management</h2>
+                    <div class="form-group">
+                        <label for="storageType">Storage Type:</label>
+                        <select id="storageType">
+                            <option value="google_drive">Google Drive</option>
+                            <option value="dropbox">Dropbox</option>
+                            <option value="s3">Amazon S3</option>
+                            <option value="vault">Wasabi (Vault)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="storageName">Storage Name:</label>
+                        <input type="text" id="storageName" required>
+                    </div>
+                    <div class="form-group" id="googleDriveCredentials">
+                        <h3>Google Drive Credentials</h3>
+                        <input type="text" id="gdClientId" placeholder="Client ID">
+                        <input type="password" id="gdClientSecret" placeholder="Client Secret">
+                        <input type="text" id="gdRefreshToken" placeholder="Refresh Token">
+                    </div>
+                    <div class="form-group" id="dropboxCredentials" style="display:none">
+                        <h3>Dropbox Credentials</h3>
+                        <input type="text" id="dbxAccessToken" placeholder="Access Token">
+                        <input type="text" id="dbxAppKey" placeholder="App Key">
+                        <input type="password" id="dbxAppSecret" placeholder="App Secret">
+                    </div>
+                    <div class="form-group" id="s3Credentials" style="display:none">
+                        <h3>S3 Credentials</h3>
+                        <input type="text" id="s3AccessKey" placeholder="Access Key ID">
+                        <input type="password" id="s3SecretKey" placeholder="Secret Access Key">
+                        <input type="text" id="s3Region" placeholder="Region">
+                        <input type="text" id="s3Bucket" placeholder="Bucket">
+                        <input type="text" id="s3Endpoint" placeholder="Endpoint (optional)">
+                    </div>
+                    <button id="createStorageBtn" disabled>Create Storage</button>
+                    <button id="getStorageListBtn" disabled>List Storage Accounts</button>
+                    <button id="getStorageStatsBtn" disabled>Get Storage Stats</button>
+                </div>
+
+                <div class="panel">
+                    <h2>File Operations</h2>
+                    <div class="form-group">
+                        <label for="uploadFile">Upload File:</label>
+                        <input type="file" id="uploadFile">
+                    </div>
+                    <div class="form-group">
+                        <label for="uploadPath">Path:</label>
+                        <input type="text" id="uploadPath" value="/" placeholder="Upload path">
+                    </div>
+                    <button id="uploadFileBtn" disabled>Upload File</button>
+                    <div id="uploadProgress" style="display:none">
+                        <div style="width:100%; background:#eee; height:20px; border-radius:10px; margin-top:10px;">
+                            <div id="progressBar"
+                                style="width:0%; background:var(--primary-color); height:20px; border-radius:10px;">
+                            </div>
+                        </div>
+                        <div id="progressText">0%</div>
+                    </div>
+                </div>
+
+                <div class="panel">
+                    <h2>Storage Results</h2>
+                    <pre id="storageResult">No results yet</pre>
+                </div>
+            </div>
+
+            <div class="tab-content" id="rooms-tab">
+                <div class="panel">
+                    <h2>Room Management</h2>
+                    <div class="form-group">
+                        <label for="roomName">Room Name:</label>
+                        <input type="text" id="roomName" required>
+                    </div>
+                    <div class="form-group">
+                        <label for="roomDescription">Description:</label>
+                        <textarea id="roomDescription"></textarea>
+                    </div>
+                    <div class="form-group">
+                        <label for="roomPassword">Password (optional):</label>
+                        <input type="password" id="roomPassword">
+                    </div>
+                    <div class="form-group">
+                        <label for="roomExpiry">Expires After (hours):</label>
+                        <input type="number" id="roomExpiry" value="24">
+                    </div>
+                    <div class="form-group">
+                        <label>Options:</label>
+                        <div>
+                            <input type="checkbox" id="roomPublic">
+                            <label for="roomPublic">Public Room</label>
+                        </div>
+                        <div>
+                            <input type="checkbox" id="roomP2P">
+                            <label for="roomP2P">P2P Transfers</label>
+                        </div>
+                    </div>
+                    <button id="createRoomBtn" disabled>Create Room</button>
+                    <button id="listRoomsBtn" disabled>List Rooms</button>
+                </div>
+
+                <div class="panel">
+                    <h2>Room Actions</h2>
+                    <div class="form-group">
+                        <label for="selectedRoom">Selected Room:</label>
+                        <select id="selectedRoom" disabled>
+                            <option value="">Select a room...</option>
+                        </select>
+                    </div>
+                    <button id="lockRoomBtn" disabled>Lock Room</button>
+                    <button id="unlockRoomBtn" disabled>Unlock Room</button>
+                    <button id="getRoomInfoBtn" disabled>Get Room Info</button>
+                    <button id="joinRoomBtn" disabled>Join Room</button>
+                </div>
+
+                <div class="panel">
+                    <h2>Room File Transfer</h2>
+                    <div class="form-group">
+                        <label for="roomUploadFile">Upload File to Room:</label>
+                        <input type="file" id="roomUploadFile">
+                    </div>
+                    <button id="roomUploadBtn" disabled>Upload to Room</button>
+                    <div id="roomUploadProgress" style="display:none">
+                        <div style="width:100%; background:#eee; height:20px; border-radius:10px; margin-top:10px;">
+                            <div id="roomProgressBar"
+                                style="width:0%; background:var(--primary-color); height:20px; border-radius:10px;">
+                            </div>
+                        </div>
+                        <div id="roomProgressText">0%</div>
+                    </div>
+                    <button id="cancelTransferBtn" disabled>Cancel Transfer</button>
+                </div>
+
+                <div class="panel">
+                    <h2>Room Results</h2>
+                    <pre id="roomResult">No results yet</pre>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div id="loading" class="loading" style="display: none;">
+        <div class="spinner"></div>
+    </div>
+
+    <script>
+        // Configuration elements
+        const apiUrlInput = document.getElementById('apiUrl');
+        const auth0DomainInput = document.getElementById('auth0Domain');
+        const auth0ClientIdInput = document.getElementById('auth0ClientId');
+        const auth0AudienceInput = document.getElementById('auth0Audience');
+        const dockerStatusElement = document.getElementById('dockerStatus');
+        const testConnectionBtn = document.getElementById('testConnection');
+
+        // Auth0 variables
+        let auth0Client = null;
+        let auth0Token = null;
+        let apiToken = null;
+        let currentCompanyId = null;
+
+        // UI elements
+        const authStatus = document.getElementById('authStatus');
+        const loginBtn = document.getElementById('loginBtn');
+        const logoutBtn = document.getElementById('logoutBtn');
+        const loading = document.getElementById('loading');
+
+        // Company form elements
+        const createCompanyBtn = document.getElementById('createCompanyBtn');
+        const searchCompaniesBtn = document.getElementById('searchCompaniesBtn');
+        const searchResults = document.getElementById('searchResults');
+
+        // Member form elements
+        const addMemberBtn = document.getElementById('addMemberBtn');
+        const listMembersBtn = document.getElementById('listMembersBtn');
+        const membersList = document.getElementById('membersList');
+
+        // Settings form elements
+        const updateSettingsBtn = document.getElementById('updateSettingsBtn');
+        const getSettingsBtn = document.getElementById('getSettingsBtn');
+        const settingsDisplay = document.getElementById('settingsDisplay');
+
+        // Storage form elements
+        const storageTypeSelect = document.getElementById('storageType');
+        const storageNameInput = document.getElementById('storageName');
+        const createStorageBtn = document.getElementById('createStorageBtn');
+        const getStorageListBtn = document.getElementById('getStorageListBtn');
+        const getStorageStatsBtn = document.getElementById('getStorageStatsBtn');
+        const uploadFileInput = document.getElementById('uploadFile');
+        const uploadPathInput = document.getElementById('uploadPath');
+        const uploadFileBtn = document.getElementById('uploadFileBtn');
+        const uploadProgress = document.getElementById('uploadProgress');
+        const progressBar = document.getElementById('progressBar');
+        const progressText = document.getElementById('progressText');
+        const storageResult = document.getElementById('storageResult');
+
+        // Credential form elements
+        const googleDriveCredentials = document.getElementById('googleDriveCredentials');
+        const dropboxCredentials = document.getElementById('dropboxCredentials');
+        const s3Credentials = document.getElementById('s3Credentials');
+
+        // Room form elements
+        const roomNameInput = document.getElementById('roomName');
+        const roomDescriptionInput = document.getElementById('roomDescription');
+        const roomPasswordInput = document.getElementById('roomPassword');
+        const roomExpiryInput = document.getElementById('roomExpiry');
+        const roomPublicCheckbox = document.getElementById('roomPublic');
+        const roomP2PCheckbox = document.getElementById('roomP2P');
+        const createRoomBtn = document.getElementById('createRoomBtn');
+        const listRoomsBtn = document.getElementById('listRoomsBtn');
+        const selectedRoomSelect = document.getElementById('selectedRoom');
+        const lockRoomBtn = document.getElementById('lockRoomBtn');
+        const unlockRoomBtn = document.getElementById('unlockRoomBtn');
+        const getRoomInfoBtn = document.getElementById('getRoomInfoBtn');
+        const joinRoomBtn = document.getElementById('joinRoomBtn');
+        const roomUploadFileInput = document.getElementById('roomUploadFile');
+        const roomUploadBtn = document.getElementById('roomUploadBtn');
+        const roomUploadProgress = document.getElementById('roomUploadProgress');
+        const roomProgressBar = document.getElementById('roomProgressBar');
+        const roomProgressText = document.getElementById('roomProgressText');
+        const cancelTransferBtn = document.getElementById('cancelTransferBtn');
+        const roomResult = document.getElementById('roomResult');
+
+        // Current selected storage and room
+        let currentStorageId = null;
+        let currentRoomId = null;
+        let currentTransferId = null;
+
+        // Tab handling
+        const tabs = document.querySelectorAll('.tab');
+        const tabContents = document.querySelectorAll('.tab-content');
+
+        tabs.forEach(tab => {
+            tab.addEventListener('click', () => {
+                const tabId = tab.dataset.tab;
+
+                // Update active tab
+                tabs.forEach(t => t.classList.remove('active'));
+                tab.classList.add('active');
+
+                // Show corresponding content
+                tabContents.forEach(content => {
+                    content.classList.remove('active');
+                    if (content.id === `${tabId}-tab`) {
+                        content.classList.add('active');
+                    }
+                });
+            });
+        });
+
+        // Show loading spinner
+        const showLoading = () => {
+            loading.style.display = 'flex';
+        };
+
+        // Hide loading spinner
+        const hideLoading = () => {
+            loading.style.display = 'none';
+        };
+
+        // Get configured API URL
+        const getApiUrl = () => apiUrlInput.value.trim();
+
+        // Test connection to API
+        const testConnection = async () => {
+            try {
+                showLoading();
+                dockerStatusElement.textContent = 'Checking...';
+                dockerStatusElement.className = 'status';
+
+                const response = await fetch(`${getApiUrl()}/health`, {
+                    method: 'GET',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    }
+                });
+
+                if (response.ok) {
+                    const data = await response.json();
+                    dockerStatusElement.textContent = `Connected (${data.status || 'OK'})`;
+                    dockerStatusElement.className = 'status connected';
+                    return true;
+                } else {
+                    throw new Error(`Status: ${response.status}`);
+                }
+            } catch (error) {
+                dockerStatusElement.textContent = 'Not Connected';
+                dockerStatusElement.className = 'status disconnected';
+                showError('Error connecting to API: ' + error.message);
+                return false;
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Initialize Auth0 client
+        const initAuth0 = async () => {
+            try {
+                const domain = auth0DomainInput.value.trim();
+                const clientId = auth0ClientIdInput.value.trim();
+                const audience = auth0AudienceInput.value.trim();
+
+                auth0Client = await auth0.createAuth0Client({
+                    domain,
+                    clientId,
+                    authorizationParams: {
+                        redirect_uri: window.location.href,
+                        audience
+                    }
+                });
+
+                // Check if user was redirected after login
+                if (window.location.search.includes('code=')) {
+                    await auth0Client.handleRedirectCallback();
+                    window.history.replaceState({}, document.title, window.location.pathname);
+                    updateUI();
+                } else {
+                    await updateUI();
+                }
+            } catch (error) {
+                showError('Error initializing Auth0: ' + error.message);
+            }
+        };
+
+        // Update UI based on authentication state
+        const updateUI = async () => {
+            try {
+                const isAuthenticated = await auth0Client.isAuthenticated();
+
+                if (isAuthenticated) {
+                    loginBtn.disabled = true;
+                    logoutBtn.disabled = false;
+                    createCompanyBtn.disabled = false;
+                    searchCompaniesBtn.disabled = false;
+                    addMemberBtn.disabled = false;
+                    listMembersBtn.disabled = false;
+                    updateSettingsBtn.disabled = false;
+                    getSettingsBtn.disabled = false;
+
+                    // Enable storage buttons
+                    createStorageBtn.disabled = false;
+                    getStorageListBtn.disabled = false;
+                    getStorageStatsBtn.disabled = false;
+
+                    // Enable room buttons
+                    createRoomBtn.disabled = false;
+                    listRoomsBtn.disabled = false;
+
+                    const user = await auth0Client.getUser();
+                    authStatus.textContent = `Logged in as: ${user.email}`;
+
+                    // Get API token
+                    auth0Token = await auth0Client.getTokenSilently();
+
+                    // Login to API
+                    await apiLogin();
+                } else {
+                    loginBtn.disabled = false;
+                    logoutBtn.disabled = true;
+                    createCompanyBtn.disabled = true;
+                    searchCompaniesBtn.disabled = true;
+                    addMemberBtn.disabled = true;
+                    listMembersBtn.disabled = true;
+                    updateSettingsBtn.disabled = true;
+                    getSettingsBtn.disabled = true;
+
+                    // Disable storage buttons
+                    createStorageBtn.disabled = true;
+                    getStorageListBtn.disabled = true;
+                    getStorageStatsBtn.disabled = true;
+                    uploadFileBtn.disabled = true;
+
+                    // Disable room buttons
+                    createRoomBtn.disabled = true;
+                    listRoomsBtn.disabled = true;
+                    lockRoomBtn.disabled = true;
+                    unlockRoomBtn.disabled = true;
+                    getRoomInfoBtn.disabled = true;
+                    joinRoomBtn.disabled = true;
+                    roomUploadBtn.disabled = true;
+                    cancelTransferBtn.disabled = true;
+                    selectedRoomSelect.disabled = true;
+
+                    authStatus.textContent = 'Not logged in';
+                    auth0Token = null;
+                    apiToken = null;
+                }
+            } catch (error) {
+                showError('Error updating UI: ' + error.message);
+            }
+        };
+
+        // API login
+        const apiLogin = async () => {
+            try {
+                const response = await fetch(`${getApiUrl()}/auth/login`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify({ idToken: auth0Token })
+                });
+
+                const data = await response.json();
+
+                if (data.success) {
+                    apiToken = data.data.token;
+                    showSuccess('API login successful');
+                } else {
+                    throw new Error(data.message || 'API login failed');
+                }
+            } catch (error) {
+                showError('API login failed: ' + error.message);
+            }
+        };
+
+        // Create company
+        const createCompany = async () => {
+            try {
+                showLoading();
+
+                const companyData = {
+                    name: document.getElementById('companyName').value,
+                    description: document.getElementById('companyDescription').value,
+                    website: document.getElementById('companyWebsite').value,
+                    industry: document.getElementById('companyIndustry').value,
+                    size: document.getElementById('companySize').value,
+                    location: document.getElementById('companyLocation').value
+                };
+
+                const response = await fetch(`${getApiUrl()}/companies`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiToken}`
+                    },
+                    body: JSON.stringify(companyData)
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Company created successfully');
+                    currentCompanyId = data.id;
+                    // Clear form
+                    document.getElementById('companyName').value = '';
+                    document.getElementById('companyDescription').value = '';
+                    document.getElementById('companyWebsite').value = '';
+                    document.getElementById('companyIndustry').value = '';
+                    document.getElementById('companySize').value = '';
+                    document.getElementById('companyLocation').value = '';
+                } else {
+                    throw new Error(data.message || 'Failed to create company');
+                }
+            } catch (error) {
+                showError('Error creating company: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Search companies
+        const searchCompanies = async () => {
+            try {
+                showLoading();
+
+                const response = await fetch(`${getApiUrl()}/companies/search?query=&page=1&limit=10`, {
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    displayCompanies(data.data);
+                } else {
+                    throw new Error(data.message || 'Failed to search companies');
+                }
+            } catch (error) {
+                showError('Error searching companies: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Display companies
+        const displayCompanies = (companies) => {
+            searchResults.innerHTML = companies.map(company => `
+        <div class="company-card">
+          <h3>${company.name}</h3>
+          <p><strong>Description:</strong> ${company.description || 'N/A'}</p>
+          <p><strong>Website:</strong> ${company.website || 'N/A'}</p>
+          <p><strong>Industry:</strong> ${company.industry || 'N/A'}</p>
+          <p><strong>Size:</strong> ${company.size || 'N/A'}</p>
+          <p><strong>Location:</strong> ${company.location || 'N/A'}</p>
+          <button onclick="selectCompany('${company.id}')">Select</button>
+        </div>
+      `).join('');
+        };
+
+        // Select company
+        const selectCompany = (companyId) => {
+            currentCompanyId = companyId;
+            showSuccess(`Selected company: ${companyId}`);
+        };
+
+        // Add member
+        const addMember = async () => {
+            if (!currentCompanyId) {
+                showError('Please select a company first');
+                return;
+            }
+
+            try {
+                showLoading();
+
+                const memberData = {
+                    email: document.getElementById('memberEmail').value,
+                    role: document.getElementById('memberRole').value
+                };
+
+                const response = await fetch(`${getApiUrl()}/companies/${currentCompanyId}/members`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiToken}`
+                    },
+                    body: JSON.stringify(memberData)
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Member added successfully');
+                    document.getElementById('memberEmail').value = '';
+                    listMembers();
+                } else {
+                    throw new Error(data.message || 'Failed to add member');
+                }
+            } catch (error) {
+                showError('Error adding member: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // List members
+        const listMembers = async () => {
+            if (!currentCompanyId) {
+                showError('Please select a company first');
+                return;
+            }
+
+            try {
+                showLoading();
+
+                const response = await fetch(`${getApiUrl()}/companies/${currentCompanyId}/members`, {
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    displayMembers(data);
+                } else {
+                    throw new Error(data.message || 'Failed to list members');
+                }
+            } catch (error) {
+                showError('Error listing members: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Display members
+        const displayMembers = (members) => {
+            membersList.innerHTML = members.map(member => `
+        <div class="company-card">
+          <p><strong>Email:</strong> ${member.email}</p>
+          <p><strong>Role:</strong> ${member.role}</p>
+          <button onclick="removeMember('${member.id}')">Remove</button>
+        </div>
+      `).join('');
+        };
+
+        // Update settings
+        const updateSettings = async () => {
+            if (!currentCompanyId) {
+                showError('Please select a company first');
+                return;
+            }
+
+            try {
+                showLoading();
+
+                const settingsData = {
+                    notifications: document.getElementById('settingsNotifications').value,
+                    security: document.getElementById('settingsSecurity').value
+                };
+
+                const response = await fetch(`${getApiUrl()}/companies/${currentCompanyId}/settings`, {
+                    method: 'PUT',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiToken}`
+                    },
+                    body: JSON.stringify(settingsData)
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Settings updated successfully');
+                    getSettings();
+                } else {
+                    throw new Error(data.message || 'Failed to update settings');
+                }
+            } catch (error) {
+                showError('Error updating settings: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Get settings
+        const getSettings = async () => {
+            if (!currentCompanyId) {
+                showError('Please select a company first');
+                return;
+            }
+
+            try {
+                showLoading();
+
+                const response = await fetch(`${getApiUrl()}/companies/${currentCompanyId}/settings`, {
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    settingsDisplay.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    throw new Error(data.message || 'Failed to get settings');
+                }
+            } catch (error) {
+                showError('Error getting settings: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Show error message
+        const showError = (message) => {
+            const errorDiv = document.createElement('div');
+            errorDiv.className = 'error-message';
+            errorDiv.textContent = message;
+            document.body.insertBefore(errorDiv, document.body.firstChild);
+            setTimeout(() => errorDiv.remove(), 5000);
+        };
+
+        // Show success message
+        const showSuccess = (message) => {
+            const successDiv = document.createElement('div');
+            successDiv.className = 'success-message';
+            successDiv.textContent = message;
+            document.body.insertBefore(successDiv, document.body.firstChild);
+            setTimeout(() => successDiv.remove(), 5000);
+        };
+
+        // Show the right credentials form based on storage type
+        storageTypeSelect.addEventListener('change', () => {
+            const selectedType = storageTypeSelect.value;
+            googleDriveCredentials.style.display = 'none';
+            dropboxCredentials.style.display = 'none';
+            s3Credentials.style.display = 'none';
+
+            if (selectedType === 'google_drive') {
+                googleDriveCredentials.style.display = 'block';
+            } else if (selectedType === 'dropbox') {
+                dropboxCredentials.style.display = 'block';
+            } else if (selectedType === 's3' || selectedType === 'vault') {
+                s3Credentials.style.display = 'block';
+            }
+        });
+
+        // Create a storage account
+        const createStorage = async () => {
+            try {
+                showLoading();
+
+                const storageType = storageTypeSelect.value;
+                const name = storageNameInput.value;
+
+                if (!name) {
+                    throw new Error('Storage name is required');
+                }
+
+                let credentials = {};
+
+                if (storageType === 'google_drive') {
+                    credentials = {
+                        type: 'google_drive',
+                        clientId: document.getElementById('gdClientId').value,
+                        clientSecret: document.getElementById('gdClientSecret').value,
+                        refreshToken: document.getElementById('gdRefreshToken').value
+                    };
+                } else if (storageType === 'dropbox') {
+                    credentials = {
+                        type: 'dropbox',
+                        accessToken: document.getElementById('dbxAccessToken').value,
+                        appKey: document.getElementById('dbxAppKey').value,
+                        appSecret: document.getElementById('dbxAppSecret').value
+                    };
+                } else if (storageType === 's3' || storageType === 'vault') {
+                    credentials = {
+                        type: storageType,
+                        accessKeyId: document.getElementById('s3AccessKey').value,
+                        secretAccessKey: document.getElementById('s3SecretKey').value,
+                        region: document.getElementById('s3Region').value,
+                        bucket: document.getElementById('s3Bucket').value,
+                        endpoint: document.getElementById('s3Endpoint').value
+                    };
+                }
+
+                const response = await fetch(`${getApiUrl()}/storage`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiToken}`
+                    },
+                    body: JSON.stringify({
+                        name,
+                        companyId: currentCompanyId,
+                        storageType,
+                        isDefault: true,
+                        credentials
+                    })
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Storage account created successfully');
+                    currentStorageId = data.data.id;
+                    storageResult.textContent = JSON.stringify(data, null, 2);
+
+                    // Enable upload button
+                    uploadFileBtn.disabled = false;
+                } else {
+                    throw new Error(data.message || 'Failed to create storage account');
+                }
+            } catch (error) {
+                showError('Error creating storage account: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // List storage accounts
+        const listStorageAccounts = async () => {
+            try {
+                showLoading();
+
+                if (!currentCompanyId) {
+                    throw new Error('Please select a company first');
+                }
+
+                const response = await fetch(`${getApiUrl()}/storage/company/${currentCompanyId}`, {
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    storageResult.textContent = JSON.stringify(data, null, 2);
+
+                    if (data.data && data.data.length > 0) {
+                        currentStorageId = data.data[0].id;
+                        uploadFileBtn.disabled = false;
+                    }
+                } else {
+                    throw new Error(data.message || 'Failed to list storage accounts');
+                }
+            } catch (error) {
+                showError('Error listing storage accounts: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Get storage stats
+        const getStorageStats = async () => {
+            try {
+                showLoading();
+
+                if (!currentStorageId) {
+                    throw new Error('Please create or select a storage account first');
+                }
+
+                const response = await fetch(`${getApiUrl()}/storage/${currentStorageId}/stats`, {
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    storageResult.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    throw new Error(data.message || 'Failed to get storage stats');
+                }
+            } catch (error) {
+                showError('Error getting storage stats: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Upload file with progress tracking
+        const uploadFile = async () => {
+            try {
+                if (!currentStorageId) {
+                    throw new Error('Please create or select a storage account first');
+                }
+
+                const file = uploadFileInput.files[0];
+                if (!file) {
+                    throw new Error('Please select a file to upload');
+                }
+
+                const formData = new FormData();
+                formData.append('file', file);
+
+                const path = uploadPathInput.value || '/';
+
+                uploadProgress.style.display = 'block';
+                progressBar.style.width = '0%';
+                progressText.textContent = '0%';
+
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', `${getApiUrl()}/storage/${currentStorageId}/upload?path=${encodeURIComponent(path)}`);
+                xhr.setRequestHeader('Authorization', `Bearer ${apiToken}`);
+
+                xhr.upload.addEventListener('progress', (event) => {
+                    if (event.lengthComputable) {
+                        const percent = Math.round((event.loaded / event.total) * 100);
+                        progressBar.style.width = `${percent}%`;
+                        progressText.textContent = `${percent}%`;
+                    }
+                });
+
+                xhr.onload = function () {
+                    if (xhr.status === 201) {
+                        const data = JSON.parse(xhr.responseText);
+                        storageResult.textContent = JSON.stringify(data, null, 2);
+                        showSuccess('File uploaded successfully');
+                    } else {
+                        showError('Upload failed: ' + xhr.statusText);
+                    }
+                    uploadProgress.style.display = 'none';
+                };
+
+                xhr.onerror = function () {
+                    showError('Upload failed');
+                    uploadProgress.style.display = 'none';
+                };
+
+                xhr.send(formData);
+            } catch (error) {
+                showError('Error uploading file: ' + error.message);
+                uploadProgress.style.display = 'none';
+            }
+        };
+
+        // Create a room
+        const createRoom = async () => {
+            try {
+                showLoading();
+
+                const name = roomNameInput.value;
+
+                if (!name) {
+                    throw new Error('Room name is required');
+                }
+
+                const roomData = {
+                    name,
+                    description: roomDescriptionInput.value,
+                    password: roomPasswordInput.value || undefined,
+                    expiresIn: parseInt(roomExpiryInput.value) * 3600, // Convert hours to seconds
+                    isPublic: roomPublicCheckbox.checked,
+                    enableP2P: roomP2PCheckbox.checked,
+                    companyId: currentCompanyId
+                };
+
+                const response = await fetch(`${getApiUrl()}/rooms`, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${apiToken}`
+                    },
+                    body: JSON.stringify(roomData)
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Room created successfully');
+                    currentRoomId = data.data.id;
+                    roomResult.textContent = JSON.stringify(data, null, 2);
+
+                    // Update room select
+                    await listRooms();
+                } else {
+                    throw new Error(data.message || 'Failed to create room');
+                }
+            } catch (error) {
+                showError('Error creating room: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // List rooms
+        const listRooms = async () => {
+            try {
+                showLoading();
+
+                const response = await fetch(`${getApiUrl()}/rooms`, {
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    roomResult.textContent = JSON.stringify(data, null, 2);
+
+                    // Update room select dropdown
+                    selectedRoomSelect.innerHTML = '<option value="">Select a room...</option>';
+
+                    if (data.data && data.data.length > 0) {
+                        data.data.forEach(room => {
+                            const option = document.createElement('option');
+                            option.value = room.id;
+                            option.textContent = room.name;
+                            selectedRoomSelect.appendChild(option);
+                        });
+
+                        selectedRoomSelect.disabled = false;
+                        lockRoomBtn.disabled = false;
+                        unlockRoomBtn.disabled = false;
+                        getRoomInfoBtn.disabled = false;
+                        joinRoomBtn.disabled = false;
+                        roomUploadBtn.disabled = false;
+
+                        if (currentRoomId) {
+                            selectedRoomSelect.value = currentRoomId;
+                        } else {
+                            currentRoomId = data.data[0].id;
+                            selectedRoomId = currentRoomId;
+                        }
+                    }
+                } else {
+                    throw new Error(data.message || 'Failed to list rooms');
+                }
+            } catch (error) {
+                showError('Error listing rooms: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Lock a room
+        const lockRoom = async () => {
+            try {
+                showLoading();
+
+                if (!currentRoomId) {
+                    throw new Error('Please select a room first');
+                }
+
+                const response = await fetch(`${getApiUrl()}/rooms/${currentRoomId}/lock`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Room locked successfully');
+                    roomResult.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    throw new Error(data.message || 'Failed to lock room');
+                }
+            } catch (error) {
+                showError('Error locking room: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Unlock a room
+        const unlockRoom = async () => {
+            try {
+                showLoading();
+
+                if (!currentRoomId) {
+                    throw new Error('Please select a room first');
+                }
+
+                const response = await fetch(`${getApiUrl()}/rooms/${currentRoomId}/unlock`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Room unlocked successfully');
+                    roomResult.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    throw new Error(data.message || 'Failed to unlock room');
+                }
+            } catch (error) {
+                showError('Error unlocking room: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Get room info
+        const getRoomInfo = async () => {
+            try {
+                showLoading();
+
+                if (!currentRoomId) {
+                    throw new Error('Please select a room first');
+                }
+
+                const response = await fetch(`${getApiUrl()}/rooms/${currentRoomId}`, {
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    roomResult.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    throw new Error(data.message || 'Failed to get room info');
+                }
+            } catch (error) {
+                showError('Error getting room info: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Join a room
+        const joinRoom = async () => {
+            try {
+                showLoading();
+
+                if (!currentRoomId) {
+                    throw new Error('Please select a room first');
+                }
+
+                const response = await fetch(`${getApiUrl()}/rooms/${currentRoomId}/join`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Joined room successfully');
+                    roomResult.textContent = JSON.stringify(data, null, 2);
+                } else {
+                    throw new Error(data.message || 'Failed to join room');
+                }
+            } catch (error) {
+                showError('Error joining room: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Upload file to room
+        const uploadFileToRoom = async () => {
+            try {
+                if (!currentRoomId) {
+                    throw new Error('Please select a room first');
+                }
+
+                const file = roomUploadFileInput.files[0];
+                if (!file) {
+                    throw new Error('Please select a file to upload');
+                }
+
+                const formData = new FormData();
+                formData.append('file', file);
+
+                roomUploadProgress.style.display = 'block';
+                roomProgressBar.style.width = '0%';
+                roomProgressText.textContent = '0%';
+                cancelTransferBtn.disabled = false;
+
+                const xhr = new XMLHttpRequest();
+                xhr.open('POST', `${getApiUrl()}/rooms/${currentRoomId}/files`);
+                xhr.setRequestHeader('Authorization', `Bearer ${apiToken}`);
+
+                xhr.upload.addEventListener('progress', (event) => {
+                    if (event.lengthComputable) {
+                        const percent = Math.round((event.loaded / event.total) * 100);
+                        roomProgressBar.style.width = `${percent}%`;
+                        roomProgressText.textContent = `${percent}%`;
+                    }
+                });
+
+                xhr.onload = function () {
+                    if (xhr.status === 201) {
+                        const data = JSON.parse(xhr.responseText);
+                        roomResult.textContent = JSON.stringify(data, null, 2);
+                        showSuccess('File uploaded to room successfully');
+                        currentTransferId = data.data.transferId;
+                    } else {
+                        showError('Upload failed: ' + xhr.statusText);
+                    }
+                    roomUploadProgress.style.display = 'none';
+                    cancelTransferBtn.disabled = true;
+                };
+
+                xhr.onerror = function () {
+                    showError('Upload to room failed');
+                    roomUploadProgress.style.display = 'none';
+                    cancelTransferBtn.disabled = true;
+                };
+
+                xhr.send(formData);
+            } catch (error) {
+                showError('Error uploading file to room: ' + error.message);
+                roomUploadProgress.style.display = 'none';
+                cancelTransferBtn.disabled = true;
+            }
+        };
+
+        // Cancel file transfer
+        const cancelTransfer = async () => {
+            try {
+                if (!currentRoomId || !currentTransferId) {
+                    throw new Error('No active transfer to cancel');
+                }
+
+                const response = await fetch(`${getApiUrl()}/rooms/${currentRoomId}/files/transfer/${currentTransferId}/cancel`, {
+                    method: 'POST',
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                const data = await response.json();
+
+                if (response.ok) {
+                    showSuccess('Transfer cancelled successfully');
+                    roomResult.textContent = JSON.stringify(data, null, 2);
+                    roomUploadProgress.style.display = 'none';
+                } else {
+                    throw new Error(data.message || 'Failed to cancel transfer');
+                }
+            } catch (error) {
+                showError('Error cancelling transfer: ' + error.message);
+            } finally {
+                cancelTransferBtn.disabled = true;
+            }
+        };
+
+        // Event Listeners
+        testConnectionBtn.addEventListener('click', testConnection);
+        loginBtn.addEventListener('click', () => auth0Client.loginWithRedirect());
+        logoutBtn.addEventListener('click', () => {
+            auth0Client.logout({
+                logoutParams: {
+                    returnTo: window.location.href
+                }
+            });
+        });
+
+        // Company-related event listeners
+        createCompanyBtn.addEventListener('click', createCompany);
+        searchCompaniesBtn.addEventListener('click', searchCompanies);
+
+        // Member-related event listeners
+        addMemberBtn.addEventListener('click', addMember);
+        listMembersBtn.addEventListener('click', listMembers);
+
+        // Settings-related event listeners
+        updateSettingsBtn.addEventListener('click', updateSettings);
+        getSettingsBtn.addEventListener('click', getSettings);
+
+        // Storage-related event listeners
+        createStorageBtn.addEventListener('click', createStorage);
+        getStorageListBtn.addEventListener('click', listStorageAccounts);
+        getStorageStatsBtn.addEventListener('click', getStorageStats);
+        uploadFileBtn.addEventListener('click', uploadFile);
+
+        // Room-related event listeners
+        createRoomBtn.addEventListener('click', createRoom);
+        listRoomsBtn.addEventListener('click', listRooms);
+        selectedRoomSelect.addEventListener('change', () => {
+            currentRoomId = selectedRoomSelect.value;
+        });
+        lockRoomBtn.addEventListener('click', lockRoom);
+        unlockRoomBtn.addEventListener('click', unlockRoom);
+        getRoomInfoBtn.addEventListener('click', getRoomInfo);
+        joinRoomBtn.addEventListener('click', joinRoom);
+        roomUploadBtn.addEventListener('click', uploadFileToRoom);
+        cancelTransferBtn.addEventListener('click', cancelTransfer);
+
+        // Make selectCompany function global so it can be called from HTML
+        window.selectCompany = selectCompany;
+
+        // Make removeMember function global
+        window.removeMember = async (memberId) => {
+            if (!currentCompanyId) {
+                showError('Company ID not found');
+                return;
+            }
+
+            try {
+                showLoading();
+
+                const response = await fetch(`${getApiUrl()}/companies/${currentCompanyId}/members/${memberId}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Bearer ${apiToken}`
+                    }
+                });
+
+                if (response.ok) {
+                    showSuccess('Member removed successfully');
+                    listMembers();
+                } else {
+                    const data = await response.json();
+                    throw new Error(data.message || 'Failed to remove member');
+                }
+            } catch (error) {
+                showError('Error removing member: ' + error.message);
+            } finally {
+                hideLoading();
+            }
+        };
+
+        // Initialize on page load
+        testConnection().then(connectionSuccessful => {
+            if (connectionSuccessful) {
+                initAuth0();
+            }
+        });
+    </script>
+</body>
+
+</html>

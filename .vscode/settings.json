@@ -1,14 +1,15 @@
 {
-    "typescript.tsdk": "node_modules/typescript/lib",
-    "eslint.validate": ["typescript"],
-    "files.exclude": {
-      "**/.git": true,
-      "**/.DS_Store": true,
-      "node_modules": true,
-      "dist": false
-    },
-    "search.exclude": {
-      "**/node_modules": true,
-      "**/dist": true
-    },
-  }
+  "typescript.tsdk": "node_modules/typescript/lib",
+  "eslint.validate": ["typescript"],
+  "files.exclude": {
+    "**/.git": true,
+    "**/.DS_Store": true,
+    "node_modules": true,
+    "dist": false
+  },
+  "search.exclude": {
+    "**/node_modules": true,
+    "**/dist": true
+  },
+  "liveServer.settings.port": 5501
+}

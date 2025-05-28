@@ -4,7 +4,7 @@
 export type UserRole = 'admin' | 'user' | 'guest';
 
 // Storage provider types
-export type StorageProvider = 'wasabi' | 'storj' | 'google-drive' | 'dropbox' | 's3';
+export type StorageProvider = 'vault' | 's3' | 'google_drive' | 'dropbox' | 'azure_blob' | 'gcp_storage' | 'cloud';
 
 // Response status types
 export type ResponseStatus = 'success' | 'error';
