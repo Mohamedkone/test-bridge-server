@@ -106,12 +106,25 @@ export class CompanyController {
     try {
       const { id } = req.params;
       const members = await this.companyService.getCompanyMembers(id);
-      res.json(members);
+      
+      const users = await Promise.all(
+        members.map(async (member) => {
+          const user = await this.userService.getUserById(member.userId);
+          if (user) {
+            return { ...user, role: member.role };
+          }
+          return null;
+        })
+      );
+      
+      // Filter out null values
+      const validUsers = users.filter(user => user !== null);
+      
+      res.json(validUsers);
     } catch (error: any) {
       next(error);
     }
   }
-
   /**
    * Add member to company
    */

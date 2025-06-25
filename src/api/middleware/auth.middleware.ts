@@ -43,7 +43,7 @@ export class AuthMiddleware {
       if (!user) {
         throw new ValidationError('Invalid token');
       }
-
+      
       req.user = user;
       next();
     } catch (error: any) {

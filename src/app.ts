@@ -27,7 +27,7 @@ app.use(helmet({
 app.use(cors({
   origin: env.NODE_ENV === 'production' 
     ? ['https://yourdomain.com'] 
-    : ['http://localhost:3000', 'http://localhost:5173', 'http://127.0.0.1:5501'],
+    : ['http://localhost:3000', 'http://localhost:5173', 'http://localhost:5174', 'http://127.0.0.1:5501'],
   credentials: true
 }));
 app.use(express.json()); // Parse JSON request body

@@ -1,0 +1,1 @@
+ALTER TABLE `users` ADD `is_onbarding` boolean DEFAULT true NOT NULL;

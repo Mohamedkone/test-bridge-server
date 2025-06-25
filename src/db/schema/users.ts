@@ -18,6 +18,7 @@ export const users = mysqlTable('users', {
   role: varchar('role', { length: 50 }).notNull().default('user'),
   status: varchar('status', { length: 50 }).notNull().default('active'),
   isGuest: boolean('is_guest').notNull().default(false),
+  isOnboarding: boolean('is_onbarding').notNull().default(true),
   lastLoginAt: timestamp('last_login_at'),
   metadata: json('metadata').$type<Record<string, any>>().default({}),
   createdAt: timestamp('created_at').notNull().defaultNow(),
